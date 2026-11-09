@@ -1,0 +1,38 @@
+; Engine configuration file.
+; Dota Heroes - 冰封王座 / 回合制策略 RPG 原型
+
+config_version=5
+
+[application]
+
+config/name="Dota Heroes: 冰封王座"
+config/description="以 Dota1 英雄与世界为背景的回合制 4X 策略 + 战棋 RPG"
+config/version="0.1.0"
+run/main_scene="res://scenes/Main.tscn"
+config/features=PackedStringArray("4.7", "GL Compatibility")
+config/icon="res://icon.svg"
+boot_splash/show_image=false
+
+[autoload]
+
+Game="*res://autoload/Game.gd"
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=800
+window/size/window_width_override=1280
+window/size/window_height_override=800
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+window/handheld/orientation=1
+
+[input_devices]
+
+pointing/emulate_mouse_from_touch=true
+pointing/emulate_touch_from_mouse=false
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+textures/canvas_textures/default_texture_filter=1
