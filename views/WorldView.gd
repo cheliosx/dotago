@@ -37,7 +37,7 @@ class WorldMap extends Control:
 		txt(pos, s, fs, col)
 
 	func poly(c: Vector2i, shrink: float = 0.0) -> PackedVector2Array:
-		var p := Hex.polygon(c, hex_size - shrink)
+		var p := Hex.polygon(c, hex_size, shrink)
 		var out := PackedVector2Array()
 		for v in p:
 			out.append(v + origin)
@@ -100,8 +100,8 @@ class WorldMap extends Control:
 			match o.kind:
 				"town": draw_town(p, o, a)
 				"mine": draw_mine(p, o, a)
-				"camp": draw_glyph(p, "怪", Color("#d0684c"), o.name, a)
-				"cache": draw_glyph(p, "宝", Color("#d8b45a"), o.name, a)
+				"camp": draw_glyph(p, "怪", Color("#d0684c"), a)
+				"cache": draw_glyph(p, "宝", Color("#d8b45a"), a)
 
 		# 英雄
 		for h in Game.heroes:
@@ -114,18 +114,28 @@ class WorldMap extends Control:
 				p = anim_from.lerp(anim_to, anim_t) + origin
 			draw_hero(p, h)
 
-		# 悬停框
+		# 悬停框 + 浮动名称（避免相邻格的长名称互相压叠）
 		if hover.x >= 0 and Game.tiles.has(Hex.key(hover)):
 			var pts := poly(hover, 1.5)
 			for i in range(6):
 				draw_line(pts[i], pts[(i + 1) % 6], Color("#ffffff", 0.65), 2.0)
+			if Game.is_explored(hover):
+				var o := Game.object_at(hover)
+				var caption := ""
+				if not o.is_empty():
+					caption = String(o.ref.name)
+				else:
+					caption = String(DB.TERRAIN[Game.terrain(hover)].name)
+				if caption != "":
+					var tp := Hex.center(hover, hex_size) + origin + Vector2(0, -hex_size - 5)
+					txt_bg(tp, caption, 13, UI.C_GOLD)
 
-	func draw_glyph(p: Vector2, g: String, col: Color, name: String, a: Color) -> void:
+	func draw_glyph(p: Vector2, g: String, col: Color, a: Color) -> void:
+		# 物件全名仅在悬停浮层中显示，避免相邻格文字互相压叠
 		var c := col * a
 		draw_circle(p, 14.0, Color("#10141d", 0.85 * a.a))
 		draw_arc(p, 14.0, 0, TAU, 32, c, 2.0)
 		txt(p + Vector2(0, 6), g, 16, c)
-		txt_bg(p + Vector2(0, 27), name, 11, Color("#e9e2d2", a.a))
 
 	func draw_mine(p: Vector2, o: Dictionary, a: Color) -> void:
 		var col := Color(DB.RES[o.res].color) * a
@@ -139,7 +149,7 @@ class WorldMap extends Control:
 			owner_mark = "◆"
 		elif o.owner == Game.enemy_faction:
 			owner_mark = "▲"
-		txt_bg(p + Vector2(0, 28), owner_mark + o.name, 11, Color(DB.RES[o.res].color, a.a))
+		txt_bg(p + Vector2(0, 26), owner_mark + DB.RES[o.res].short, 11, Color(DB.RES[o.res].color, a.a))
 
 	func draw_town(p: Vector2, o: Dictionary, a: Color) -> void:
 		var col := Color(DB.FACTIONS[o.owner].color) * a

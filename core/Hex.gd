@@ -38,12 +38,15 @@ static func neighbors(c: Vector2i) -> Array:
 static func center(c: Vector2i, size: float) -> Vector2:
 	return Vector2(size * SQRT3 * (float(c.x) + 0.5 * float(c.y & 1)), size * 1.5 * float(c.y))
 
-static func polygon(c: Vector2i, size: float) -> PackedVector2Array:
+## shrink 只缩小半径，格子中心始终由 size 决定。
+## 早期版本把 size 同时用于中心与半径，导致不同缩进的图层中心漂移、互相错位。
+static func polygon(c: Vector2i, size: float, shrink: float = 0.0) -> PackedVector2Array:
 	var pts := PackedVector2Array()
 	var ctr := center(c, size)
+	var r := maxf(1.0, size - shrink)
 	for i in range(6):
 		var ang := deg_to_rad(float(60 * i - 30))
-		pts.append(ctr + Vector2(cos(ang), sin(ang)) * size)
+		pts.append(ctr + Vector2(cos(ang), sin(ang)) * r)
 	return pts
 
 static func board_size(cols: int, rows: int, size: float) -> Vector2:

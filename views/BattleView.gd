@@ -18,7 +18,7 @@ class BattleBoard extends Control:
 		draw_string(f, Vector2(pos.x - (w / 2.0 if centered else 0.0), pos.y), s, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, col)
 
 	func poly(c: Vector2i, shrink: float = 0.0) -> PackedVector2Array:
-		var p := Hex.polygon(c, hex_size - shrink)
+		var p := Hex.polygon(c, hex_size, shrink)
 		var out := PackedVector2Array()
 		for v in p:
 			out.append(v + origin)

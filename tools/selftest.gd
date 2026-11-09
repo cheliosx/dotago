@@ -19,6 +19,23 @@ func _process(_delta) -> bool:
 			main = load("res://scenes/Main.tscn").instantiate()
 			root.add_child(main)
 			note("Main.tscn 实例化，子节点 = " + str(main.get_child_count()))
+			# 回归检查：不同缩进的六边形图层必须同心，否则地形/高亮/图标会互相错位
+			var cell := Vector2i(15, 10)
+			var pa := Hex.polygon(cell, 30.0, 0.8)
+			var pb := Hex.polygon(cell, 30.0, 2.0)
+			var ca := Vector2.ZERO
+			var cb := Vector2.ZERO
+			for v in pa:
+				ca += v
+			for v in pb:
+				cb += v
+			ca /= 6.0
+			cb /= 6.0
+			var err := ca.distance_to(cb)
+			var ctr_err := Hex.center(cell, 30.0).distance_to(ca)
+			note("六边形图层同心误差 = %.6f px，与物件中心误差 = %.6f px" % [err, ctr_err])
+			if err > 0.001 or ctr_err > 0.001:
+				note("!! 六边形图层错位，请检查 Hex.polygon")
 		2:
 			G.new_game("crystal_maiden")
 			G.goto("world", {})
