@@ -1,15 +1,19 @@
 class_name BattleView
 extends View3DCtrl
 ## 三维战场（20×13 六边形战棋）。
-## 交互与大地图统一：
-##   左键点击 / 单指点按   → 查看：部队信息面板；点空白关闭
-##   右键点击 / 单指拖动   → 指令：移动、攻击、施法
-##   双指拖动 / 捏合 / 滚轮 → 平移与缩放
-## 规则（行动顺序、攻击反击、法术、AI、自动战斗、战后结算）与旧版完全一致。
+##
+## 交互：
+##   左键点击 / 单指点按   → 选我方单位（出现可移动区域）；点敌方单位查看情报；点空地取消选择
+##   右键点击 / 单指拖动   → 让选中单位移动；已点亮普攻/技能时，右键 = 对目标施放
+##   底部面板：普攻 + 4 个兵种技能（带冷却，冷却中按钮变灰）
+##   双指拖动平移、捏合缩放
+##
+## 回合：每回合按速度排行动顺序；轮到玩家时，可自由选择任一未行动的我方单位。
 
 const BCOLS := 20
 const BROWS := 13
 const ELEV := 0.30
+const MOVE_T := 0.12
 
 # ---------------------------------------------------------------- 规则状态
 var b: Dictionary = {}
@@ -20,9 +24,7 @@ var stacks := []
 var order := []
 var turn_idx := 0
 var round_no := 1
-var active := -1
-var mode := "normal"
-var spell_id := ""
+var active := -1          # 我方当前选中的单位 / 敌方正在行动的单位
 var reach := {}
 var obstacles := []
 var hero_cast := false
@@ -32,17 +34,24 @@ var finished := false
 var log_lines := []
 var mana := 0
 var rng := RandomNumberGenerator.new()
+var pending_skill := ""   # "" / "attack" / "skill:<id>" / "spell:<id>"
+var moved_once := false
+var anim_lock := false
 
 # ---------------------------------------------------------------- 三维节点
 var terrain_mi: MeshInstance3D
 var overlay_mi: MeshInstance3D
 var piece_root: Node3D
 var blocker_root: Node3D
-var unit_nodes := {}    # idx -> Node3D
-var unit_labels := {}   # idx -> Label3D
-var unit_rings := {}    # idx -> Node3D
-var unit_bars := {}     # idx -> Node3D（血条容器）
-var unit_targets := {}  # idx -> Vector3
+var fx_root: Node3D
+var unit_nodes := {}
+var unit_holders := {}
+var unit_labels := {}
+var unit_rings := {}
+var unit_bars := {}
+var unit_hp_frac := {}     # idx -> 目标血条比例（_process 里平滑逼近）
+var unit_dying := {}
+var anim_ignore := {}
 
 # ---------------------------------------------------------------- UI
 var topbar: PanelContainer
@@ -89,7 +98,7 @@ func _ready() -> void:
 	sync_units()
 	start_round()
 
-# ==================================================================== 场景搭建
+# ==================================================================== 场景
 func _build_scene() -> void:
 	terrain_mi = MeshInstance3D.new()
 	terrain_mi.material_override = terrain_material()
@@ -101,6 +110,8 @@ func _build_scene() -> void:
 	world.add_child(blocker_root)
 	piece_root = Node3D.new()
 	world.add_child(piece_root)
+	fx_root = Node3D.new()
+	world.add_child(fx_root)
 
 func _cell_pos(c: Vector2i) -> Vector3:
 	return Hex3D.to_world(c, HEX_S) + Vector3(0, ELEV, 0)
@@ -126,8 +137,6 @@ func build_board() -> void:
 			var top := _zone_color(c)
 			Hex3D.add_prism(st, c, HEX_S, 0.965, -0.5, ELEV, top, top.darkened(0.5))
 	terrain_mi.mesh = st.commit()
-
-	# 障碍物：几块岩石
 	for c in obstacles:
 		var node := Node3D.new()
 		node.position = _cell_pos(c)
@@ -139,31 +148,35 @@ func build_board() -> void:
 func build_overlay() -> void:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	# 可移动格
 	for key in reach:
 		var c := Hex.from_key(key)
 		Hex3D.add_face(st, c, HEX_S, 0.88, ELEV + 0.03, Color(1.0, 0.90, 0.42, 0.34))
 	if reach.size() > 0:
 		add_region_edges(st, reach, HEX_S, func(_c: Vector2i) -> float: return ELEV + 0.034,
 			Color(1.0, 0.92, 0.50, 1.0), 0.11)
-	# 敌方单位：红环提示可攻击目标
+	# 敌方单位红环；点亮技能后有效目标再加亮
 	for s in stacks:
 		if int(s.count) <= 0 or int(s.side) == 0:
 			continue
-		Hex3D.add_outline(st, s.pos, HEX_S, 0.90, ELEV + 0.035, Color(0.88, 0.36, 0.32, 0.95), 0.09)
-	# 施法模式：全盘淡紫
-	if mode == "spell":
-		for y in range(BROWS):
-			for x in range(BCOLS):
-				Hex3D.add_face(st, Vector2i(x, y), HEX_S, 0.86, ELEV + 0.045, Color(0.70, 0.54, 0.88, 0.10))
-	# 指令目标 / 悬停
-	if cmd_cell.x >= 0:
-		Hex3D.add_outline(st, cmd_cell, HEX_S, 0.93, ELEV + 0.05, Color(1.0, 0.55, 0.25, 0.95), 0.10)
+		var armed := pending_skill != ""
+		var col := Color(1.0, 0.55, 0.35, 1.0) if armed else Color(0.88, 0.36, 0.32, 0.9)
+		Hex3D.add_outline(st, s.pos, HEX_S, 0.90, ELEV + 0.035, col, 0.11 if armed else 0.09)
+	# 技能范围预览
+	if pending_skill != "":
+		var rad := _pending_radius()
+		if rad > 0 and cmd_cell.x >= 0:
+			for y in range(BROWS):
+				for x in range(BCOLS):
+					var cc := Vector2i(x, y)
+					if Hex.dist(cc, cmd_cell) <= rad:
+						Hex3D.add_face(st, cc, HEX_S, 0.80, ELEV + 0.05, Color(0.95, 0.55, 0.30, 0.20))
+		if cmd_cell.x >= 0:
+			Hex3D.add_outline(st, cmd_cell, HEX_S, 0.93, ELEV + 0.06, Color(1.0, 0.60, 0.25, 0.95), 0.10)
 	if hover_cell.x >= 0:
-		Hex3D.add_outline(st, hover_cell, HEX_S, 0.94, ELEV + 0.055, Color(1, 1, 1, 0.85), 0.09)
+		Hex3D.add_outline(st, hover_cell, HEX_S, 0.94, ELEV + 0.065, Color(1, 1, 1, 0.8), 0.08)
 	overlay_mi.mesh = st.commit()
 
-# ==================================================================== 单位棋子
+# ==================================================================== 棋子
 func _make_unit(s: Dictionary) -> Node3D:
 	var idx := int(s.idx)
 	var u: Dictionary = DB.UNITS[s.unit]
@@ -172,14 +185,16 @@ func _make_unit(s: Dictionary) -> Node3D:
 	var node := Node3D.new()
 	node.position = _cell_pos(s.pos)
 	node.scale = Vector3(1.5, 1.5, 1.5)
-	add_cyl(node, Vector3(0, 0.05, 0), 0.40, 0.10, fac.darkened(0.45), 12)
-	# 躯干：远程兵细高、重甲兵方块、其余矮方块
-	var body: MeshInstance3D
+	var holder := Node3D.new()
+	node.add_child(holder)
+	unit_holders[idx] = holder
+
+	add_cyl(holder, Vector3(0, 0.05, 0), 0.34, 0.10, fac.darkened(0.45), 12)
 	if int(u.range) > 2:
-		body = add_cyl(node, Vector3(0, 0.42, 0), 0.14, 0.72, col.darkened(0.25), 8, 0.06)
+		add_cyl(holder, Vector3(0, 0.42, 0), 0.14, 0.72, col.darkened(0.25), 8, 0.06)
 	else:
 		var sz := Vector3(0.34, 0.56, 0.34) if int(u.tier) >= 4 else Vector3(0.30, 0.44, 0.30)
-		body = add_box(node, Vector3(0, 0.05 + sz.y * 0.5, 0), sz, col.darkened(0.3))
+		add_box(holder, Vector3(0, 0.05 + sz.y * 0.5, 0), sz, col.darkened(0.3))
 	var head := MeshInstance3D.new()
 	var sp := SphereMesh.new()
 	sp.radius = 0.11
@@ -187,17 +202,18 @@ func _make_unit(s: Dictionary) -> Node3D:
 	head.mesh = sp
 	head.material_override = mat(col.lightened(0.25))
 	head.position = Vector3(0, 0.82, 0)
-	node.add_child(head)
-	# 血条（容器 + 底色 + 填充，填充用 X 缩放表示比例）
+	holder.add_child(head)
+
 	var bar := Node3D.new()
-	bar.position = Vector3(0, 1.02, 0)
-	var bg := add_box(bar, Vector3.ZERO, Vector3(0.62, 0.06, 0.02), Color("#11151d"))
+	bar.position = Vector3(0, 1.22, 0)
+	var bg := add_box(bar, Vector3.ZERO, Vector3(0.70, 0.09, 0.02), Color("#11151d"))
 	bg.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	var fill := add_box(bar, Vector3.ZERO, Vector3(0.62, 0.05, 0.03), UI.C_GREEN if int(s.side) == 0 else UI.C_RED)
+	var fill := add_box(bar, Vector3.ZERO, Vector3(0.70, 0.08, 0.03), UI.C_GREEN if int(s.side) == 0 else UI.C_RED)
 	fill.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	node.add_child(bar)
+	fill.name = "Fill"
+	holder.add_child(bar)
 	unit_bars[idx] = bar
-	# 行动中光环
+
 	var ring := Node3D.new()
 	var torus := TorusMesh.new()
 	torus.inner_radius = 0.42
@@ -211,75 +227,87 @@ func _make_unit(s: Dictionary) -> Node3D:
 	mi.position = Vector3(0, 0.12, 0)
 	ring.add_child(mi)
 	ring.visible = false
-	node.add_child(ring)
+	holder.add_child(ring)
 	unit_rings[idx] = ring
-	unit_labels[idx] = add_label(node, "%s ×%d" % [u.name, int(s.count)], Vector3(0, 1.26, 0), col.lightened(0.15), 40)
+
+	unit_labels[idx] = add_label(holder, "×%d" % int(s.count), Vector3(0, 1.62, 0), col.lightened(0.2), 32)
 	piece_root.add_child(node)
+	var frac := float(s.top_hp) / float(maxf(1, int(u.hp)))
+	unit_hp_frac[idx] = frac
+	fill.scale.x = 0.70 * frac
+	fill.position.x = -0.35 * (1.0 - frac)
 	return node
 
 func sync_units() -> void:
 	for s in stacks:
 		var idx := int(s.idx)
 		if int(s.count) <= 0:
-			if unit_nodes.has(idx):
-				unit_nodes[idx].visible = false
+			if unit_nodes.has(idx) and not unit_dying.has(idx):
+				_die(idx)
 			continue
 		if not unit_nodes.has(idx):
 			unit_nodes[idx] = _make_unit(s)
-			unit_targets[idx] = _cell_pos(s.pos)
 		var node: Node3D = unit_nodes[idx]
 		node.visible = true
-		unit_targets[idx] = _cell_pos(s.pos)
-		if node.position.distance_to(_cell_pos(s.pos)) > 3.0:
+		if not anim_ignore.has(idx):
 			node.position = _cell_pos(s.pos)
 		var u: Dictionary = DB.UNITS[s.unit]
 		var l: Label3D = unit_labels[idx]
-		l.text = "%s ×%d" % [u.name, int(s.count)]
-		l.modulate = Color(u.color).lightened(0.15)
-		var bar: Node3D = unit_bars[idx]
-		var frac := clampf(float(s.top_hp) / float(maxf(1, int(u.hp))), 0.0, 1.0)
-		var fill: MeshInstance3D = bar.get_child(1)
-		fill.scale.x = maxf(0.02, frac)
-		fill.position.x = -0.31 * (1.0 - frac)
+		if idx == active or inspect_idx == idx:
+			l.text = "%s ×%d" % [u.name, int(s.count)]
+			l.font_size = 38
+		else:
+			l.text = "×%d" % int(s.count)
+			l.font_size = 32
+		l.modulate = Color(u.color).lightened(0.2)
+		unit_hp_frac[idx] = clampf(float(s.top_hp) / float(maxf(1, int(u.hp))), 0.0, 1.0)
 		var ring: Node3D = unit_rings[idx]
 		ring.visible = idx == active
-
-func update_units_states() -> void:
-	# 状态徽标（防御 / 等待 / 霜甲）
-	for s in stacks:
-		var idx := int(s.idx)
-		if int(s.count) <= 0 or not unit_nodes.has(idx):
-			continue
 		var tag := ""
 		if s.defending:
 			tag = "防"
 		elif int(s.buff_def) > 0:
 			tag = "霜"
-		elif s.waited:
-			tag = "待"
-		var node: Node3D = unit_nodes[idx]
-		var badge = node.get_node_or_null("Badge")
+		var badge: Node = unit_holders[idx].get_node_or_null("Badge")
 		if tag == "":
 			if badge != null:
 				badge.queue_free()
-			continue
-		if badge == null:
-			var l := add_label(node, tag, Vector3(0.34, 1.24, 0), UI.C_GOLD, 30)
-			l.name = "Badge"
+		elif badge == null:
+			var bl := add_label(unit_holders[idx], tag, Vector3(0.36, 1.26, 0), UI.C_GOLD, 30)
+			bl.name = "Badge"
 		else:
 			badge.text = tag
 
+func _die(idx: int) -> void:
+	if unit_dying.has(idx):
+		return
+	unit_dying[idx] = true
+	var node: Node3D = unit_nodes.get(idx, null)
+	if node == null:
+		return
+	var tw := create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(node, "scale", Vector3(0.05, 0.05, 0.05), 0.34).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_IN)
+	tw.tween_property(node, "position:y", node.position.y - 0.5, 0.34)
+	tw.tween_property(node, "rotation:y", node.rotation.y + 2.2, 0.34)
+	tw.set_parallel(false)
+	tw.tween_callback(func(): node.visible = false)
+
 func _process(delta: float) -> void:
 	super(delta)
-	for idx in unit_targets.keys():
-		var node: Node3D = unit_nodes.get(idx, null)
-		if node == null:
+	# 血条平滑：数值已在规则层结算，这里把视觉追上去
+	for idx in unit_bars.keys():
+		var bar: Node3D = unit_bars[idx]
+		var fill: MeshInstance3D = bar.get_node_or_null("Fill")
+		if fill == null:
 			continue
-		var target: Vector3 = unit_targets[idx]
-		if node.position.distance_to(target) > 0.02:
-			node.position = node.position.lerp(target, minf(1.0, delta * 9.0))
+		var target: float = clampf(float(unit_hp_frac.get(idx, 1.0)), 0.02, 1.0)
+		var cur: float = fill.scale.x / 0.70
+		var nx: float = lerpf(cur, target, minf(1.0, delta * 7.0))
+		fill.scale.x = 0.70 * nx
+		fill.position.x = -0.35 * (1.0 - nx)
 
-# ==================================================================== 规则（与原版一致）
+# ==================================================================== 规则
 func setup_stacks() -> void:
 	var p_slots := [Vector2i(3, 1), Vector2i(3, 3), Vector2i(3, 5), Vector2i(3, 7), Vector2i(3, 9), Vector2i(1, 2), Vector2i(1, 4)]
 	var e_slots := [Vector2i(16, 1), Vector2i(16, 3), Vector2i(16, 5), Vector2i(16, 7), Vector2i(16, 9), Vector2i(18, 2), Vector2i(18, 4)]
@@ -305,7 +333,8 @@ func make_stack(idx: int, uid: String, count: int, side_id: int, pos: Vector2i) 
 	var u: Dictionary = DB.UNITS[uid]
 	return {"idx": idx, "unit": uid, "count": maxi(1, count), "top_hp": int(u.hp),
 			"side": side_id, "pos": pos, "acted": false, "retaliated": false,
-			"defending": false, "waited": false, "buff_def": 0, "slow": 0}
+			"defending": false, "waited": false, "buff_def": 0, "slow": 0,
+			"atk_bonus": 0, "cd": {}}
 
 func side_hero_stats(side_id: int) -> Dictionary:
 	if side_id == 0:
@@ -322,6 +351,9 @@ func eff_speed(s: Dictionary) -> int:
 	var u: Dictionary = DB.UNITS[s.unit]
 	return int(u.spd) + int(side_hero_stats(s.side).spd) - int(s.slow)
 
+func eff_atk(s: Dictionary) -> int:
+	return int(DB.UNITS[s.unit].atk) + int(s.get("atk_bonus", 0))
+
 func start_round() -> void:
 	if finished:
 		return
@@ -331,6 +363,9 @@ func start_round() -> void:
 		s.acted = false
 		s.retaliated = false
 		s.defending = false
+		var cd: Dictionary = s.cd
+		for k in cd.keys():
+			cd[k] = maxi(0, int(cd[k]) - 1)
 	order = []
 	for s in stacks:
 		if int(s.count) > 0:
@@ -338,6 +373,9 @@ func start_round() -> void:
 	var cmp := func(a, b2): return eff_speed(stacks[a]) > eff_speed(stacks[b2])
 	order.sort_custom(cmp)
 	turn_idx = 0
+	pending_skill = ""
+	active = -1
+	reach = {}
 	add_log("—— 第 %d 回合 ——" % round_no)
 	foe_hero_spell()
 	next_turn()
@@ -360,19 +398,33 @@ func next_turn() -> void:
 			return
 		start_round()
 		return
-	active = order[turn_idx]
-	recompute_reach()
-	if stacks[active].side == 1:
+	var i2: int = order[turn_idx]
+	if int(stacks[i2].side) == 1:
+		active = i2
 		busy = true
-		ai_act(active)
+		pending_skill = ""
+		reach = {}
+		hint.text = "敌方行动：%s" % DB.UNITS[stacks[i2].unit].name
+		refresh_view()
+		ai_act(i2)
 	else:
+		# 玩家回合：不锁定具体单位，等玩家点选任一未行动的我方单位
+		active = -1
 		busy = false
-		hint.text = "轮到 %s（速度 %d）· 右键 / 按住拖动 移动或攻击" % [DB.UNITS[stacks[active].unit].name, eff_speed(stacks[active])]
-	refresh_view()
+		pending_skill = ""
+		reach = {}
+		hint.text = "你的回合 · 点击我方单位选择行动（右键移动 / 选技能后点目标）"
+		refresh_view()
+
+func player_can_act() -> bool:
+	return not finished and not busy and not anim_lock \
+		and turn_idx < order.size() and int(stacks[order[turn_idx]].side) == 0
 
 func recompute_reach() -> void:
 	reach = {}
-	if active < 0 or stacks[active].side != 0 or mode == "spell":
+	if active < 0 or int(stacks[active].side) != 0:
+		return
+	if moved_once or pending_skill != "":
 		return
 	var s: Dictionary = stacks[active]
 	var u: Dictionary = DB.UNITS[s.unit]
@@ -417,190 +469,296 @@ func check_end() -> bool:
 		return true
 	return false
 
-# ==================================================================== 指令
+# ==================================================================== 选择与指令
+func select_unit(idx: int) -> void:
+	if finished or busy or anim_lock:
+		return
+	if active >= 0:
+		hint.text = "先结束当前单位的行动"
+		return
+	var s: Dictionary = stacks[idx]
+	if int(s.side) != 0:
+		inspect_idx = idx
+		show_sheet()
+		return
+	if s.acted:
+		hint.text = "%s 本回合已行动" % DB.UNITS[s.unit].name
+		return
+	if not player_can_act():
+		hint.text = "现在还不能行动"
+		return
+	active = idx
+	moved_once = false
+	pending_skill = ""
+	recompute_reach()
+	center_on(_cell_pos(s.pos))
+	hint.text = "已选择 %s：右键移动，或点下方普攻 / 技能后选目标" % DB.UNITS[s.unit].name
+	refresh_view()
+
+func deselect() -> void:
+	if active < 0:
+		return
+	active = -1
+	pending_skill = ""
+	moved_once = false
+	reach = {}
+	hint.text = "点击我方单位选择行动"
+	refresh_view()
+
+func on_command(pos: Vector2) -> void:
+	cmd_cell = Vector2i(-1, -1)
+	var c := cell_at_screen(pos)
+	if c.x < 0:
+		build_overlay()
+		return
+	command_at(c)
+	build_overlay()
+
 func command_at(c: Vector2i) -> void:
-	if finished or busy or active < 0:
-		hint.text = "等待敌方行动……"
+	if finished or busy or anim_lock:
 		return
-	if int(stacks[active].side) != 0:
+	if pending_skill != "":
+		use_pending(c)
 		return
-	if mode == "spell":
-		cast_spell(c)
+	if active < 0:
+		hint.text = "先点击我方单位"
 		return
-	var s: Dictionary = stacks[active]
-	var u: Dictionary = DB.UNITS[s.unit]
 	var target := stack_at(c)
-	if target >= 0 and stacks[target].side == 1:
-		var d := Hex.dist(s.pos, c)
-		var adjacent_enemy := has_adjacent_enemy(s)
-		if int(u.range) > 1 and d >= 2 and d <= int(u.range) and not adjacent_enemy:
-			attack(active, target, true)
-			end_action()
-		else:
-			var dest := best_approach(s, c)
-			if dest.x >= 0:
-				s.pos = dest
-				var nd := Hex.dist(s.pos, c)
-				var can_hit := (nd <= 1) or (int(u.range) > 1 and nd >= 2 and nd <= int(u.range))
-				if can_hit:
-					attack(active, target, int(u.range) > 1 and nd >= 2)
-				else:
-					add_log("%s 向目标推进。" % u.name)
-			else:
-				hint.text = "无法接近该目标"
-				return
-			end_action()
+	if target >= 0 and int(stacks[target].side) == 1:
+		hint.text = "先用下方「普攻」或技能选中攻击方式"
 		return
 	if reach.has(Hex.key(c)) and cell_free(c):
-		s.pos = c
-		add_log("%s 移动到 (%d,%d)。" % [u.name, c.x, c.y])
-		end_action()
+		_do_move(active, c)
 	else:
 		hint.text = "该格无法到达，或已被占据"
 
-func has_adjacent_enemy(s: Dictionary) -> bool:
-	for n in Hex.neighbors(s.pos):
-		var t := stack_at(n)
-		if t >= 0 and stacks[t].side != s.side:
-			return true
-	return false
-
-func best_approach(s: Dictionary, target: Vector2i) -> Vector2i:
-	var best := Vector2i(-1, -1)
-	var best_d := 999
-	var candidates := [s.pos]
-	for key in reach:
-		candidates.append(Hex.from_key(key))
-	for c in candidates:
-		var d := Hex.dist(c, target)
-		if d == 0:
-			continue
-		if d < best_d and (c == s.pos or cell_free(c)):
-			best_d = d
-			best = c
-	return best
-
-func end_action() -> void:
-	if active < 0:
+func _do_move(idx: int, dest: Vector2i) -> void:
+	var s: Dictionary = stacks[idx]
+	var path := _path_from_reach(s.pos, dest)
+	if path.is_empty():
+		hint.text = "找不到路径"
 		return
-	stacks[active].acted = true
-	active = -1
-	turn_idx += 1
-	mode = "normal"
-	spell_id = ""
-	next_turn()
-
-func action_defend() -> void:
-	if finished or busy or active < 0 or int(stacks[active].side) != 0:
-		return
-	stacks[active].defending = true
-	add_log("%s 进入防御姿态。" % DB.UNITS[stacks[active].unit].name)
-	end_action()
-
-func action_wait() -> void:
-	if finished or busy or active < 0 or int(stacks[active].side) != 0:
-		return
-	var s: Dictionary = stacks[active]
-	if s.waited:
-		hint.text = "本回合已经等待过"
-		return
-	s.waited = true
-	order.append(active)
-	active = -1
-	turn_idx += 1
-	next_turn()
-
-func select_spell(sid: String) -> void:
-	if finished or busy or active < 0 or int(stacks[active].side) != 0:
-		hint.text = "请等待我方部队行动"
-		return
-	if hero_cast:
-		hint.text = "本回合英雄已经施法"
-		return
-	if int(DB.SPELLS[sid].cost) > mana:
-		hint.text = "魔法值不足"
-		return
-	spell_id = sid
-	mode = "spell"
+	anim_lock = true
+	anim_ignore[idx] = true
+	s.pos = dest
+	moved_once = true
 	reach = {}
-	add_log("选择法术「%s」，右键（或按住拖动）选择目标。" % DB.SPELLS[sid].name)
-	if DB.SPELLS[sid].type == "drain_all":
-		cast_spell(Vector2i(-1, -1))
-		return
-	hint.text = "施法模式：右键 / 按住拖动 选择目标（友军法术点我方单位）"
+	refresh_view()
+	await move_along(idx, path)
+	anim_ignore.erase(idx)
+	anim_lock = false
+	pending_skill = ""
+	center_on(_cell_pos(dest))
+	hint.text = "%s 已移动：可选目标攻击，或点「结束行动」" % DB.UNITS[s.unit].name
 	refresh_view()
 
-func cancel_spell() -> void:
-	mode = "normal"
-	spell_id = ""
-	recompute_reach()
+func _path_from_reach(from: Vector2i, to: Vector2i) -> Array:
+	if not reach.has(Hex.key(to)):
+		return []
+	var path: Array = []
+	var cur := to
+	var guard := 0
+	while cur != from and guard < 64:
+		guard += 1
+		path.append(cur)
+		var c := int(reach[Hex.key(cur)])
+		var found := false
+		for n in Hex.neighbors(cur):
+			if n == from and c - 1 == 0:
+				cur = from
+				found = true
+				break
+			if reach.has(Hex.key(n)) and int(reach[Hex.key(n)]) == c - 1:
+				cur = n
+				found = true
+				break
+		if not found:
+			return [to]
+	path.reverse()
+	return path
+
+# ---------------------------------------------------------------- 技能
+func arm_skill(sid: String) -> void:
+	if finished or busy or anim_lock or active < 0:
+		return
+	if int(stacks[active].side) != 0:
+		return
+	# 统一成带前缀的 key：技能 "skill:<id>"，普攻 "attack"
+	var key := sid if sid == "attack" else "skill:" + sid
+	if pending_skill == key:
+		pending_skill = ""
+		recompute_reach()
+		hint.text = "已取消"
+		refresh_view()
+		return
+	if sid != "attack":
+		if int(stacks[active].cd.get(sid, 0)) > 0:
+			hint.text = "技能冷却中"
+			return
+		var sd: Dictionary = DB.UNIT_SKILLS.get(sid, {})
+		if sd.is_empty():
+			return
+		if String(sd.type) == "buff_self":
+			_apply_self_buff(sid)
+			return
+	pending_skill = key
+	reach = {}
+	var nm := "普攻"
+	if sid != "attack":
+		nm = String(DB.UNIT_SKILLS[sid].name)
+	hint.text = "已选择「%s」：点击 / 右键 目标" % nm
 	refresh_view()
 
-func cast_spell(c: Vector2i) -> void:
-	var sd: Dictionary = DB.SPELLS[spell_id]
-	var cost := int(sd.cost)
-	if cost > mana:
-		hint.text = "魔法值不足"
+func _pending_radius() -> int:
+	if pending_skill == "attack" or pending_skill == "":
+		return 0
+	if pending_skill.begins_with("skill:"):
+		var sd: Dictionary = DB.UNIT_SKILLS.get(pending_skill.substr(6), {})
+		return int(sd.get("radius", 0))
+	if pending_skill.begins_with("spell:"):
+		var sp: Dictionary = DB.SPELLS.get(pending_skill.substr(6), {})
+		return int(sp.get("radius", 0))
+	return 0
+
+func use_pending(c: Vector2i) -> void:
+	if pending_skill == "":
 		return
-	var typ: String = sd.type
-	var power := float(sd.power) * (1.0 + 0.18 * float(side_skill(0, "sorcery"))) * (1.0 + 0.05 * float(Game.hero_stats(h).power))
-	var hit := 0
-	if typ == "drain_all":
-		for s in stacks:
-			if s.side == 1 and int(s.count) > 0:
-				apply_damage(s, power * 0.7)
-				hit += 1
-		mana = mini(Game.max_mana(h), mana + 4)
-	elif typ == "line":
-		for s in stacks:
-			if s.side == 1 and int(s.count) > 0 and s.pos.y == c.y:
-				apply_damage(s, power)
-				hit += 1
-	elif typ == "aoe":
-		for s in stacks:
-			if s.side == 1 and int(s.count) > 0 and Hex.dist(s.pos, c) <= int(sd.radius):
-				apply_damage(s, power)
-				hit += 1
-	elif typ == "single":
-		var t := stack_at(c)
-		if t < 0 or stacks[t].side != 1:
-			hint.text = "请选择一支敌军"
-			return
-		apply_damage(stacks[t], power)
-		hit = 1
-	elif typ == "heal":
-		var t2 := stack_at(c)
-		if t2 < 0 or stacks[t2].side != 0:
-			hint.text = "请选择一支友军"
-			return
-		var u: Dictionary = DB.UNITS[stacks[t2].unit]
-		var pool := DB.unit_hp_pool(int(stacks[t2].count), int(stacks[t2].top_hp), stacks[t2].unit) + int(power) * int(u.hp) / 10
-		stacks[t2].count = int(ceil(float(pool) / float(u.hp)))
-		stacks[t2].top_hp = pool - (int(stacks[t2].count) - 1) * int(u.hp)
-		hit = 1
-		add_log("「神圣之光」治疗了 %s。" % u.name)
-	elif typ == "buff_def":
-		var t3 := stack_at(c)
-		if t3 < 0 or stacks[t3].side != 0:
-			hint.text = "请选择一支友军"
-			return
-		stacks[t3].buff_def = int(stacks[t3].buff_def) + int(sd.power)
-		hit = 1
-		add_log("「霜甲术」强化了 %s 的护甲。" % DB.UNITS[stacks[t3].unit].name)
-	if hit == 0 and typ != "heal" and typ != "buff_def":
-		hint.text = "法术没有命中任何目标"
+	if pending_skill == "attack":
+		_use_attack(c)
+	elif pending_skill.begins_with("skill:"):
+		_use_skill(pending_skill.substr(6), c)
+	elif pending_skill.begins_with("spell:"):
+		_cast_hero_spell(c)
+
+func _use_attack(c: Vector2i) -> void:
+	var s: Dictionary = stacks[active]
+	var u: Dictionary = DB.UNITS[s.unit]
+	var t := stack_at(c)
+	if t < 0 or int(stacks[t].side) != 1:
+		hint.text = "请选择敌方单位"
 		return
-	mana -= cost
-	hero_cast = true
-	add_log("%s 施放「%s」。" % [h.name, sd.name])
-	mode = "normal"
-	spell_id = ""
+	var d := Hex.dist(s.pos, c)
+	if d > int(u.range):
+		hint.text = "超出射程（%d 格），先移动靠近" % int(u.range)
+		return
+	if int(u.range) <= 1 and d != 1:
+		hint.text = "近战需要贴身"
+		return
+	var ranged := int(u.range) > 1 and d >= 2
+	pending_skill = ""
+	reach = {}
+	anim_lock = true
+	refresh_view()
+	await _strike(active, t, ranged)
+	attack(active, t, ranged)
+	anim_lock = false
 	if check_end():
 		return
-	recompute_reach()
-	refresh_view()
+	end_action()
 
-# ==================================================================== 伤害
+func _use_skill(sid: String, c: Vector2i) -> void:
+	var sd: Dictionary = DB.UNIT_SKILLS.get(sid, {})
+	if sd.is_empty():
+		return
+	var s: Dictionary = stacks[active]
+	var dist := Hex.dist(s.pos, c)
+	var srange := int(sd.get("range", 1))
+	if dist > srange:
+		hint.text = "超出施法距离（%d 格）" % srange
+		return
+	var typ := String(sd.type)
+	if typ == "heal":
+		var t2 := stack_at(c)
+		if t2 < 0 or int(stacks[t2].side) != 0:
+			hint.text = "请选择友军"
+			return
+	elif typ != "aoe" and typ != "line":
+		var t3 := stack_at(c)
+		if t3 < 0 or int(stacks[t3].side) != 1:
+			hint.text = "请选择敌方单位"
+			return
+	pending_skill = ""
+	reach = {}
+	anim_lock = true
+	refresh_view()
+	stacks[active].cd[sid] = int(sd.get("cd", 1))
+	if typ == "heal":
+		await _strike(active, -1, false, _cell_pos(stacks[stack_at(c)].pos))
+		_heal_ally(stack_at(c), float(sd.get("mult", 0.6)))
+	elif typ == "line":
+		await _strike(active, -1, true, _cell_pos(c))
+		for t in stacks:
+			if int(t.count) > 0 and int(t.side) == 1 and t.pos.y == c.y:
+				_skill_damage(active, t, float(sd.get("mult", 1.0)))
+	elif typ == "aoe":
+		await _strike(active, -1, true, _cell_pos(c))
+		_aoe_burst(c, int(sd.get("radius", 1)), Color(sd.get("color", "#e0a060")))
+		for t in stacks:
+			if int(t.count) > 0 and int(t.side) == 1 and Hex.dist(t.pos, c) <= int(sd.get("radius", 1)):
+				_skill_damage(active, t, float(sd.get("mult", 1.0)), int(sd.get("slow", 0)))
+	else:
+		var tg := stack_at(c)
+		await _strike(active, tg, srange > 1)
+		_skill_damage(active, stacks[tg], float(sd.get("mult", 1.0)), int(sd.get("slow", 0)))
+		if int(sd.get("mana", 0)) > 0:
+			mana = mini(Game.max_mana(h), mana + int(sd.mana))
+	add_log("%s 施放「%s」。" % [DB.UNITS[s.unit].name, String(sd.name)])
+	anim_lock = false
+	if check_end():
+		return
+	end_action()
+
+func _apply_self_buff(sid: String) -> void:
+	var sd: Dictionary = DB.UNIT_SKILLS[sid]
+	var s: Dictionary = stacks[active]
+	s.cd[sid] = int(sd.get("cd", 1))
+	if int(sd.get("atk", 0)) > 0:
+		s.atk_bonus = int(s.atk_bonus) + int(sd.atk)
+	if int(sd.get("def", 0)) > 0:
+		s.buff_def = int(s.buff_def) + int(sd.def)
+	s.defending = true
+	_burst(_cell_pos(s.pos) + Vector3(0, 0.5, 0), Color(sd.get("color", "#d8b45a")), 2.4)
+	_float_text(_cell_pos(s.pos) + Vector3(0, 1.5, 0), String(sd.name), UI.C_GOLD, 42)
+	add_log("%s 施放「%s」。" % [DB.UNITS[s.unit].name, String(sd.name)])
+	hint.text = "「%s」生效" % String(sd.name)
+	end_action()
+
+func _heal_ally(idx: int, mult: float) -> void:
+	var t: Dictionary = stacks[idx]
+	var u: Dictionary = DB.UNITS[t.unit]
+	var src: Dictionary = stacks[active]
+	var amount := int(float(int(src.count) * eff_atk(src)) * mult)
+	var pool := DB.unit_hp_pool(int(t.count), int(t.top_hp), t.unit) + amount
+	t.count = int(ceil(float(pool) / float(u.hp)))
+	t.top_hp = pool - (int(t.count) - 1) * int(u.hp)
+	_float_text(_cell_pos(t.pos) + Vector3(0, 1.4, 0), "+%d" % amount, UI.C_GREEN, 46)
+	add_log("%s 治疗了 %s（+%d）。" % [DB.UNITS[src.unit].name, u.name, amount])
+
+func _skill_damage(src_idx: int, t: Dictionary, mult: float, slow := 0) -> void:
+	var src: Dictionary = stacks[src_idx]
+	if int(t.count) <= 0:
+		return
+	var au: Dictionary = DB.UNITS[src.unit]
+	var tu: Dictionary = DB.UNITS[t.unit]
+	var ah := side_hero_stats(int(src.side))
+	var dh := side_hero_stats(int(t.side))
+	var atk_bonus := 1.0 + 0.05 * float(int(ah.atk) - int(dh.def)) + 0.08 * float(side_skill(int(src.side), "offense"))
+	var def_bonus := 1.0 + 0.05 * float(int(dh.def) - int(ah.atk)) + 0.06 * float(side_skill(int(t.side), "armorer"))
+	var reduction: float = clampf(0.03 * float(int(tu.def)) * def_bonus, 0.0, 0.62)
+	var dmg: float = float(int(src.count)) * float(eff_atk(src)) * mult * maxf(0.35, atk_bonus) * (1.0 - reduction)
+	if t.defending:
+		dmg *= 0.75
+	if int(t.buff_def) > 0:
+		dmg *= maxf(0.5, 1.0 - 0.05 * float(t.buff_def))
+	dmg *= rng.randf_range(0.92, 1.08)
+	var before := int(t.count)
+	apply_damage(t, dmg)
+	_hit_fx(int(t.idx), int(dmg), Color("#ffb070"))
+	if slow > 0:
+		t.slow = int(t.slow) + slow
+	add_log("%s 命中 %s，造成 %d 点伤害（消灭 %d）。" % [au.name, tu.name, int(dmg), before - int(t.count)])
+
+# ---------------------------------------------------------------- 普攻规则（含反击）
 func attack(a_idx: int, t_idx: int, ranged: bool) -> void:
 	var a: Dictionary = stacks[a_idx]
 	var t: Dictionary = stacks[t_idx]
@@ -615,7 +773,7 @@ func attack(a_idx: int, t_idx: int, ranged: bool) -> void:
 		atk_bonus += 0.12 * float(side_skill(a.side, "archery"))
 	var def_bonus := 1.0 + 0.05 * float(int(dh.def) - int(ah.atk)) + 0.06 * float(side_skill(t.side, "armorer"))
 	var reduction: float = clampf(0.03 * float(int(tu.def)) * def_bonus, 0.0, 0.62)
-	var dmg: float = float(int(a.count)) * float(int(au.atk)) * maxf(0.35, atk_bonus) * (1.0 - reduction)
+	var dmg: float = float(int(a.count)) * float(eff_atk(a)) * maxf(0.35, atk_bonus) * (1.0 - reduction)
 	if ranged and Hex.dist(a.pos, t.pos) <= 1:
 		dmg *= 0.5
 	if t.defending:
@@ -625,12 +783,13 @@ func attack(a_idx: int, t_idx: int, ranged: bool) -> void:
 	dmg *= rng.randf_range(0.9, 1.1)
 	var before := int(t.count)
 	apply_damage(t, dmg)
-	var killed := before - int(t.count)
-	add_log("%s %s %s，造成 %d 点伤害，消灭 %d 个。" % [au.name, "射击" if ranged else "攻击", tu.name, int(dmg), killed])
+	_hit_fx(int(t.idx), int(dmg), Color("#ffd27a"))
+	add_log("%s %s %s，造成 %d 点伤害，消灭 %d 个。" % [au.name, "射击" if ranged else "攻击", tu.name, int(dmg), before - int(t.count)])
 	if int(t.count) > 0 and not ranged and not t.retaliated and Hex.dist(a.pos, t.pos) <= 1 and int(DB.UNITS[t.unit].range) <= 2:
 		t.retaliated = true
-		var rdmg: float = float(int(t.count)) * float(int(tu.atk)) * 0.6 * (1.0 - clampf(0.03 * float(int(au.def)), 0.0, 0.5))
+		var rdmg: float = float(int(t.count)) * float(eff_atk(t)) * 0.6 * (1.0 - clampf(0.03 * float(int(au.def)), 0.0, 0.5))
 		apply_damage(a, rdmg)
+		_hit_fx(int(a.idx), int(rdmg), Color("#ff8f6a"))
 		add_log("%s 进行了反击。" % tu.name)
 
 func apply_damage(s: Dictionary, dmg: float) -> void:
@@ -647,6 +806,226 @@ func apply_damage(s: Dictionary, dmg: float) -> void:
 		s.count -= 1
 		s.top_hp = int(u.hp)
 
+# ==================================================================== 动画
+func move_along(idx: int, path: Array) -> void:
+	var node: Node3D = unit_nodes.get(idx, null)
+	var holder: Node3D = unit_holders.get(idx, null)
+	if node == null:
+		return
+	for c in path:
+		var target := _cell_pos(c)
+		var tw := create_tween()
+		tw.tween_property(node, "position", target, MOVE_T).set_trans(Tween.TRANS_SINE)
+		if holder != null:
+			var tw2 := create_tween()
+			tw2.tween_property(holder, "position:y", 0.16, MOVE_T * 0.5)
+			tw2.tween_property(holder, "position:y", 0.0, MOVE_T * 0.5)
+		await tw.finished
+
+## 出手动作：近战前冲再回位，远程射出一发光弹
+func _strike(a_idx: int, t_idx: int, ranged: bool, target_pos := Vector3.ZERO) -> void:
+	var node: Node3D = unit_nodes.get(a_idx, null)
+	if node == null:
+		return
+	var dest := target_pos
+	if dest == Vector3.ZERO and t_idx >= 0:
+		dest = _cell_pos(stacks[t_idx].pos)
+	if ranged:
+		_shoot(node.position + Vector3(0, 0.95, 0), dest + Vector3(0, 0.5, 0), Color(DB.UNITS[stacks[a_idx].unit].color))
+		await get_tree().create_timer(0.18).timeout
+	else:
+		var holder: Node3D = unit_holders.get(a_idx, null)
+		if holder == null:
+			return
+		var dir := Vector3(dest.x - node.position.x, 0, dest.z - node.position.z)
+		if dir.length() > 0.01:
+			dir = dir.normalized()
+		var tw := create_tween()
+		tw.tween_property(holder, "position", dir * 0.55, 0.09).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		tw.tween_property(holder, "position", Vector3.ZERO, 0.16)
+		await tw.finished
+
+func _shoot(from: Vector3, to: Vector3, col: Color) -> void:
+	var mi := MeshInstance3D.new()
+	var sp := SphereMesh.new()
+	sp.radius = 0.13
+	sp.height = 0.26
+	mi.mesh = sp
+	mi.material_override = mat(col.lightened(0.3), true)
+	mi.position = from
+	fx_root.add_child(mi)
+	var tw := create_tween()
+	tw.tween_property(mi, "position", to, 0.2).set_trans(Tween.TRANS_LINEAR)
+	tw.tween_callback(mi.queue_free)
+
+func _hit_fx(idx: int, dmg: int, col: Color) -> void:
+	var node: Node3D = unit_nodes.get(idx, null)
+	if node == null:
+		return
+	var holder: Node3D = unit_holders.get(idx, null)
+	_burst(node.position + Vector3(0, 0.6, 0), col)
+	_float_text(node.position + Vector3(0.35, 2.35, 0), "-%d" % dmg, col, 64)
+	if holder != null:
+		var tw := create_tween()
+		tw.tween_property(holder, "scale", Vector3(1.14, 0.86, 1.14), 0.07)
+		tw.tween_property(holder, "scale", Vector3.ONE, 0.16).set_trans(Tween.TRANS_ELASTIC)
+
+func _aoe_burst(c: Vector2i, _radius: int, col: Color) -> void:
+	_burst(_cell_pos(c) + Vector3(0, 0.3, 0), col, 2.6)
+
+func _burst(pos: Vector3, col: Color, grow: float = 1.8) -> void:
+	var mi := MeshInstance3D.new()
+	var sp := SphereMesh.new()
+	sp.radius = 0.22
+	sp.height = 0.44
+	mi.mesh = sp
+	var m := StandardMaterial3D.new()
+	m.albedo_color = Color(col.r, col.g, col.b, 0.55)
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mi.material_override = m
+	mi.position = pos
+	fx_root.add_child(mi)
+	var tw := create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(mi, "scale", Vector3(grow, grow, grow), 0.3)
+	tw.tween_property(m, "albedo_color", Color(col.r, col.g, col.b, 0.0), 0.3)
+	tw.set_parallel(false)
+	tw.tween_callback(mi.queue_free)
+
+func _float_text(pos: Vector3, text: String, col: Color, size: int = 44) -> void:
+	var l := Label3D.new()
+	l.text = text
+	l.font = UI.font()
+	l.font_size = size
+	l.pixel_size = 0.013
+	l.modulate = col
+	l.outline_size = 6
+	l.outline_modulate = Color(0, 0, 0, 0.9)
+	l.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	l.no_depth_test = true
+	l.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	l.position = pos
+	fx_root.add_child(l)
+	var tw := create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(l, "position", pos + Vector3(0.2, 1.25, 0), 0.85).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+	tw.tween_property(l, "modulate:a", 0.0, 0.85)
+	tw.set_parallel(false)
+	tw.tween_callback(l.queue_free)
+
+# ==================================================================== 行动结束
+func end_action() -> void:
+	if active >= 0:
+		stacks[active].acted = true
+	active = -1
+	pending_skill = ""
+	moved_once = false
+	turn_idx += 1
+	reach = {}
+	next_turn()
+
+func action_defend() -> void:
+	if finished or busy or anim_lock or active < 0:
+		return
+	stacks[active].defending = true
+	add_log("%s 进入防御姿态。" % DB.UNITS[stacks[active].unit].name)
+	end_action()
+
+# ---------------------------------------------------------------- 英雄法术
+func select_spell(sid: String) -> void:
+	if finished or busy or anim_lock or active < 0 or int(stacks[active].side) != 0:
+		hint.text = "请先选择一个我方单位"
+		return
+	if hero_cast:
+		hint.text = "本回合英雄已经施法"
+		return
+	if int(DB.SPELLS[sid].cost) > mana:
+		hint.text = "魔法值不足"
+		return
+	pending_skill = "spell:" + sid
+	if DB.SPELLS[sid].type == "drain_all":
+		_cast_hero_spell(Vector2i(-1, -1))
+		return
+	reach = {}
+	hint.text = "施法模式：点击 / 右键 选择目标（「%s」）" % DB.SPELLS[sid].name
+	refresh_view()
+
+func _cast_hero_spell(c: Vector2i) -> void:
+	var sid := pending_skill.substr(6)
+	if not DB.SPELLS.has(sid):
+		pending_skill = ""
+		return
+	var sd: Dictionary = DB.SPELLS[sid]
+	var cost := int(sd.cost)
+	if cost > mana:
+		hint.text = "魔法值不足"
+		pending_skill = ""
+		return
+	var typ := String(sd.type)
+	var power := float(sd.power) * (1.0 + 0.18 * float(side_skill(0, "sorcery"))) * (1.0 + 0.05 * float(Game.hero_stats(h).power))
+	var hit := 0
+	if typ == "drain_all":
+		for s in stacks:
+			if s.side == 1 and int(s.count) > 0:
+				apply_damage(s, power * 0.7)
+				_hit_fx(int(s.idx), int(power * 0.7), Color("#c58be8"))
+				hit += 1
+		mana = mini(Game.max_mana(h), mana + 4)
+	elif typ == "line":
+		for s in stacks:
+			if s.side == 1 and int(s.count) > 0 and s.pos.y == c.y:
+				apply_damage(s, power)
+				_hit_fx(int(s.idx), int(power), Color("#ffd27a"))
+				hit += 1
+	elif typ == "aoe":
+		_aoe_burst(c, int(sd.radius), Color("#86c9e0"))
+		for s in stacks:
+			if s.side == 1 and int(s.count) > 0 and Hex.dist(s.pos, c) <= int(sd.radius):
+				apply_damage(s, power)
+				_hit_fx(int(s.idx), int(power), Color("#86c9e0"))
+				hit += 1
+	elif typ == "single":
+		var t := stack_at(c)
+		if t < 0 or stacks[t].side != 1:
+			hint.text = "请选择一支敌军"
+			return
+		apply_damage(stacks[t], power)
+		_hit_fx(t, int(power), Color("#ffd27a"))
+		hit = 1
+	elif typ == "heal":
+		var t2 := stack_at(c)
+		if t2 < 0 or stacks[t2].side != 0:
+			hint.text = "请选择一支友军"
+			return
+		var u: Dictionary = DB.UNITS[stacks[t2].unit]
+		var pool := DB.unit_hp_pool(int(stacks[t2].count), int(stacks[t2].top_hp), stacks[t2].unit) + int(power) * int(u.hp) / 10
+		stacks[t2].count = int(ceil(float(pool) / float(u.hp)))
+		stacks[t2].top_hp = pool - (int(stacks[t2].count) - 1) * int(u.hp)
+		_float_text(_cell_pos(stacks[t2].pos) + Vector3(0, 1.4, 0), "+%d" % int(power), UI.C_GREEN, 46)
+		hit = 1
+		add_log("「神圣之光」治疗了 %s。" % u.name)
+	elif typ == "buff_def":
+		var t3 := stack_at(c)
+		if t3 < 0 or stacks[t3].side != 0:
+			hint.text = "请选择一支友军"
+			return
+		stacks[t3].buff_def = int(stacks[t3].buff_def) + int(sd.power)
+		hit = 1
+		add_log("「霜甲术」强化了 %s 的护甲。" % DB.UNITS[stacks[t3].unit].name)
+	if hit == 0 and typ != "heal" and typ != "buff_def":
+		hint.text = "法术没有命中任何目标"
+		return
+	mana -= cost
+	hero_cast = true
+	add_log("%s 施放「%s」。" % [h.name, sd.name])
+	pending_skill = ""
+	recompute_reach()
+	if check_end():
+		return
+	refresh_view()
+
 func foe_hero_spell() -> void:
 	if foe_cast or int(foe.get("mana", 0)) < 4 or round_no % 2 == 0:
 		return
@@ -662,11 +1041,12 @@ func foe_hero_spell() -> void:
 	foe.mana = int(foe.get("mana", 0)) - 4
 	var dmg := 18.0 * (1.0 + 0.08 * float(int(foe.get("level", 1))))
 	apply_damage(stacks[target], dmg)
+	_hit_fx(target, int(dmg), Color("#c58be8"))
 	add_log("%s 施放了奥术弹，突袭我军！" % foe.name)
 
 # ==================================================================== AI
 func ai_act(idx: int) -> void:
-	await get_tree().create_timer(0.28).timeout
+	await get_tree().create_timer(0.32).timeout
 	if finished:
 		return
 	var s: Dictionary = stacks[idx]
@@ -682,6 +1062,7 @@ func ai_act(idx: int) -> void:
 		return
 	var d := Hex.dist(s.pos, stacks[target].pos)
 	if int(u.range) > 1 and d >= 2 and d <= int(u.range) and not has_adjacent_enemy(s):
+		await _strike(idx, target, true)
 		attack(idx, target, true)
 	else:
 		var one := func(_c: Vector2i) -> int: return 1
@@ -696,11 +1077,58 @@ func ai_act(idx: int) -> void:
 				best_d = dd
 				best_cell = cc
 		if best_cell != s.pos:
+			var path := _bfs_path(s.pos, best_cell, int(u.move))
 			s.pos = best_cell
+			if not path.is_empty():
+				anim_ignore[idx] = true
+				center_on(_cell_pos(best_cell))
+				refresh_view()
+				await move_along(idx, path)
+				anim_ignore.erase(idx)
+				refresh_view()
 		if Hex.dist(s.pos, stacks[target].pos) <= 1 or (int(u.range) > 1 and Hex.dist(s.pos, stacks[target].pos) <= int(u.range)):
-			attack(idx, target, int(u.range) > 1 and Hex.dist(s.pos, stacks[target].pos) > 1)
+			var shot := int(u.range) > 1 and Hex.dist(s.pos, stacks[target].pos) > 1
+			await _strike(idx, target, shot)
+			attack(idx, target, shot)
 	busy = false
+	if check_end():
+		return
 	end_action()
+
+func _bfs_path(from: Vector2i, to: Vector2i, max_steps: int) -> Array:
+	var one := func(_c: Vector2i) -> int: return 1
+	var free_fn := func(c: Vector2i) -> bool: return cell_free(c) or c == to
+	var f := Hex.flood(from, max_steps, one, free_fn)
+	if not f.has(Hex.key(to)):
+		return []
+	var path: Array = []
+	var cur := to
+	var guard := 0
+	while cur != from and guard < 64:
+		guard += 1
+		path.append(cur)
+		var c := int(f[Hex.key(cur)])
+		var found := false
+		for n in Hex.neighbors(cur):
+			if n == from and c - 1 == 0:
+				cur = from
+				found = true
+				break
+			if f.has(Hex.key(n)) and int(f[Hex.key(n)]) == c - 1:
+				cur = n
+				found = true
+				break
+		if not found:
+			return [to]
+	path.reverse()
+	return path
+
+func has_adjacent_enemy(s: Dictionary) -> bool:
+	for n in Hex.neighbors(s.pos):
+		var t := stack_at(n)
+		if t >= 0 and stacks[t].side != s.side:
+			return true
+	return false
 
 func nearest_foe(s: Dictionary) -> int:
 	var best := -1
@@ -747,7 +1175,6 @@ func finish(win: bool) -> void:
 		return
 	finished = true
 	busy = true
-	mode = "normal"
 	var survivors := []
 	for s in stacks:
 		if s.side == 0 and int(s.count) > 0:
@@ -815,7 +1242,7 @@ func _build_ui() -> void:
 	side.offset_left = -300
 	side.offset_right = -12
 	side.offset_top = 82
-	side.offset_bottom = -86
+	side.offset_bottom = -96
 	side.mouse_filter = Control.MOUSE_FILTER_STOP
 	add_child(side)
 	var sc := ScrollContainer.new()
@@ -829,14 +1256,14 @@ func _build_ui() -> void:
 	actions.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
 	actions.offset_left = 12
 	actions.offset_right = -12
-	actions.offset_top = -74
+	actions.offset_top = -88
 	actions.offset_bottom = -12
 	actions.mouse_filter = Control.MOUSE_FILTER_STOP
 	add_child(actions)
-	action_row = UI.hbox(8)
+	action_row = UI.hbox(6)
 	actions.add_child(action_row)
 
-	hint = UI.label("战斗开始 · 点击查看 · 右键 / 按住拖动 移动攻击", 13, UI.C_GOLD)
+	hint = UI.label("战斗开始 · 点击我方单位选择行动", 13, UI.C_GOLD)
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	hint.position = Vector2(18, 80)
 	add_child(hint)
@@ -846,7 +1273,6 @@ func refresh_view() -> void:
 		return
 	build_overlay()
 	sync_units()
-	update_units_states()
 	_build_hud()
 	_build_side()
 	_build_actions()
@@ -860,8 +1286,8 @@ func _build_hud() -> void:
 		c.queue_free()
 	hud_row.add_child(UI.label("◆ %s  Lv.%d" % [h.name, h.level], 18, UI.C_BLUE))
 	hud_row.add_child(UI.label("魔法 %d/%d" % [mana, Game.max_mana(h)], 14, UI.C_PURPLE))
-	hud_row.add_child(UI.bar(float(mana), float(Game.max_mana(h)), UI.C_PURPLE, 120, 10))
-	hud_row.add_child(UI.label("VS", 16, UI.C_GOLD))
+	hud_row.add_child(UI.bar(float(mana), float(Game.max_mana(h)), UI.C_PURPLE, 110, 10))
+	hud_row.add_child(UI.label("VS", 15, UI.C_GOLD))
 	hud_row.add_child(UI.label("▲ %s" % String(foe.name), 17, UI.C_RED))
 	var sp := Control.new()
 	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -873,7 +1299,7 @@ func _build_side() -> void:
 	for c in side_box.get_children():
 		side_box.remove_child(c)
 		c.queue_free()
-	side_box.add_child(UI.title("行动顺序", 17))
+	side_box.add_child(UI.title("行动顺序", 16))
 	for i in order:
 		var s: Dictionary = stacks[i]
 		if int(s.count) <= 0:
@@ -884,25 +1310,24 @@ func _build_side() -> void:
 		dot.add_child(UI.label("我" if s.side == 0 else "敌", 11, UI.C_TEXT))
 		row.add_child(dot)
 		var l := UI.label("%s ×%d" % [u.name, int(s.count)], 12, UI.C_GOLD if int(s.idx) == active else UI.C_TEXT)
+		if bool(s.acted):
+			l.add_theme_color_override("font_color", UI.C_MUTED)
 		l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		row.add_child(l)
 		row.add_child(UI.label("速%d" % eff_speed(s), 11, UI.C_MUTED))
 		side_box.add_child(row)
 	side_box.add_child(UI.line(UI.C_GOLD_DIM))
-	side_box.add_child(UI.title("英雄法术", 17))
-	side_box.add_child(nowrap("本回合%s" % ("已施法" if hero_cast else "可施法 1 次"), 12, UI.C_MUTED))
-	var can_act: bool = not finished and not busy and active >= 0 and int(stacks[active].side) == 0
+	side_box.add_child(UI.title("英雄法术", 16))
+	side_box.add_child(nowrap("每回合 1 次，不占用部队行动" + ("（已施法）" if hero_cast else ""), 11, UI.C_MUTED))
 	for sid in h.spells:
 		var sd: Dictionary = DB.SPELLS[sid]
-		var btn := UI.button("%s  %d魔" % [sd.name, int(sd.cost)], Callable(self, "select_spell").bind(sid), 13, Vector2(0, 34), UI.C_PURPLE)
-		btn.disabled = hero_cast or int(sd.cost) > mana or not can_act or finished
-		if spell_id == sid:
+		var btn := UI.button("%s  %d魔" % [sd.name, int(sd.cost)], Callable(self, "select_spell").bind(sid), 12, Vector2(0, 32), UI.C_PURPLE)
+		btn.disabled = hero_cast or int(sd.cost) > mana or finished or busy or active < 0
+		if pending_skill == "spell:" + sid:
 			btn.text = "◆ " + String(sd.name)
 		side_box.add_child(btn)
-	if mode == "spell":
-		side_box.add_child(UI.button("取消施法", cancel_spell, 13, Vector2(0, 32), UI.C_RED))
 	side_box.add_child(UI.line(UI.C_GOLD_DIM))
-	side_box.add_child(UI.title("战斗记录", 16))
+	side_box.add_child(UI.title("战斗记录", 15))
 	var n := 0
 	for l2 in log_lines:
 		if n >= 8:
@@ -917,23 +1342,54 @@ func _build_actions() -> void:
 	for c in action_row.get_children():
 		action_row.remove_child(c)
 		c.queue_free()
-	var can_act: bool = not finished and not busy and active >= 0 and int(stacks[active].side) == 0
-	var bd := UI.button("防御", action_defend, 15, Vector2(96, 40), UI.C_MUTED)
-	bd.disabled = not can_act
-	action_row.add_child(bd)
-	var bw := UI.button("等待", action_wait, 15, Vector2(96, 40), UI.C_MUTED)
-	bw.disabled = not can_act
-	action_row.add_child(bw)
-	var ba := UI.button("自动战斗", auto_battle, 15, Vector2(126, 40), UI.C_GREEN)
-	ba.disabled = finished
-	action_row.add_child(ba)
-	var br := UI.button("撤退", func(): finish(false), 14, Vector2(88, 40), UI.C_RED)
-	br.disabled = finished
-	action_row.add_child(br)
+	var can := not finished and not busy and not anim_lock and active >= 0 and int(stacks[active].side) == 0
+	if active < 0:
+		action_row.add_child(nowrap("点击我方单位开始行动", 14, UI.C_MUTED))
+		var sp0 := Control.new()
+		sp0.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		action_row.add_child(sp0)
+		var ba0 := UI.button("自动战斗", auto_battle, 14, Vector2(120, 40), UI.C_GREEN)
+		ba0.disabled = finished
+		action_row.add_child(ba0)
+		var br0 := UI.button("撤退", func(): finish(false), 13, Vector2(84, 40), UI.C_RED)
+		br0.disabled = finished
+		action_row.add_child(br0)
+		return
+	var s: Dictionary = stacks[active]
+	var atk_btn := UI.button("普攻", Callable(self, "arm_skill").bind("attack"), 15, Vector2(76, 46), UI.C_GOLD)
+	atk_btn.disabled = not can
+	atk_btn.tooltip_text = "直接攻击目标（近战会被反击）"
+	if pending_skill == "attack":
+		atk_btn.text = "◆普攻"
+	action_row.add_child(atk_btn)
+	# 4 个兵种技能
+	for sid in DB.unit_skills(s.unit):
+		var sd: Dictionary = DB.UNIT_SKILLS[sid]
+		var cd := int(s.cd.get(sid, 0))
+		var txt := String(sd.name)
+		if cd > 0:
+			txt += "  CD %d" % cd
+		var b := UI.button(txt, Callable(self, "arm_skill").bind(sid), 13, Vector2(104, 46), Color(sd.get("color", "#b48ae0")))
+		b.disabled = (not can) or cd > 0
+		b.tooltip_text = "%s\n%s\n冷却 %d 回合" % [String(sd.name), String(sd.desc), int(sd.cd)]
+		if pending_skill == "skill:" + sid:
+			b.text = "◆" + String(sd.name)
+		action_row.add_child(b)
 	var sp := Control.new()
 	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	action_row.add_child(sp)
-	action_row.add_child(nowrap("点击查看 · 右键移动/攻击 · 双指平移缩放 · 远程贴身减半", 12, UI.C_MUTED))
+	var bd := UI.button("防御", action_defend, 13, Vector2(72, 46), UI.C_MUTED)
+	bd.disabled = not can
+	action_row.add_child(bd)
+	var be := UI.button("结束行动", end_action, 13, Vector2(88, 46), UI.C_MUTED)
+	be.disabled = not can
+	action_row.add_child(be)
+	var ba := UI.button("自动战斗", auto_battle, 12, Vector2(104, 40), UI.C_GREEN)
+	ba.disabled = finished
+	action_row.add_child(ba)
+	var br := UI.button("撤退", func(): finish(false), 12, Vector2(68, 40), UI.C_RED)
+	br.disabled = finished
+	action_row.add_child(br)
 
 # ==================================================================== 查看面板
 func fill_sheet() -> void:
@@ -955,7 +1411,6 @@ func fill_sheet() -> void:
 	margin.add_theme_constant_override("margin_top", 12)
 	margin.add_theme_constant_override("margin_bottom", 12)
 	sheet.add_child(margin)
-
 	var row := UI.hbox(18)
 	margin.add_child(row)
 	var left := UI.vbox(6)
@@ -970,43 +1425,24 @@ func fill_sheet() -> void:
 		int(u.tier), s.pos.x, s.pos.y], 13, UI.C_MUTED))
 	left.add_child(UI.label("数量 ×%d    单体生命 %d / %d" % [int(s.count), int(s.top_hp), int(u.hp)], 14, UI.C_TEXT))
 	left.add_child(UI.bar(float(s.top_hp), float(u.hp), UI.C_GREEN if int(s.side) == 0 else UI.C_RED, 300, 10))
-	left.add_child(nowrap("攻 %d  防 %d  速 %d  射程 %d" % [int(u.atk), int(u.def), eff_speed(s), int(u.range)], 14, UI.C_TEXT))
-
+	left.add_child(nowrap("攻 %d  防 %d  速 %d  射程 %d" % [eff_atk(s), int(u.def), eff_speed(s), int(u.range)], 14, UI.C_TEXT))
 	var mid := UI.vbox(6)
 	mid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(mid)
-	mid.add_child(UI.label("状 态", 13, UI.C_MUTED))
-	var tags := []
-	if s.defending:
-		tags.append("防御姿态（受伤 -25%）")
-	if int(s.buff_def) > 0:
-		tags.append("霜甲 +%d" % int(s.buff_def))
-	if s.waited:
-		tags.append("本回合已等待")
-	if bool(s.acted):
-		tags.append("本回合已行动")
-	if int(s.idx) == active:
-		tags.append("正在行动")
-	if tags.is_empty():
-		tags.append("无")
-	mid.add_child(nowrap(" · ".join(tags), 13, UI.C_GOLD))
-	var dmg := float(int(s.count)) * float(int(u.atk))
-	mid.add_child(nowrap("估算输出 约 %d 点/次（不含英雄与克制修正）" % int(dmg), 12, UI.C_MUTED))
-	if not is_equal_approx(float(u.hp), 0.0):
-		var total := DB.unit_hp_pool(int(s.count), int(s.top_hp), s.unit)
-		mid.add_child(nowrap("总生命池 %d" % total, 12, UI.C_MUTED))
-	if int(s.side) == 1 and int(s.count) > 0:
-		mid.add_child(nowrap("右键 / 按住拖动 该部队即可发起攻击", 12, UI.C_RED))
-
+	mid.add_child(UI.label("技 能", 13, UI.C_MUTED))
+	if int(s.side) == 0:
+		for sid in DB.unit_skills(s.unit):
+			var sd: Dictionary = DB.UNIT_SKILLS[sid]
+			var cd := int(s.cd.get(sid, 0))
+			mid.add_child(nowrap("%s%s — %s" % [String(sd.name), ("（CD %d）" % cd) if cd > 0 else "", String(sd.desc)], 11, Color(sd.get("color", "#b48ae0"))))
+	else:
+		mid.add_child(nowrap("敌方部队的技能无法查看", 12, UI.C_MUTED))
 	var right := UI.vbox(8)
-	right.custom_minimum_size = Vector2(180, 0)
+	right.custom_minimum_size = Vector2(170, 0)
 	row.add_child(right)
-	if int(s.idx) == active and not finished:
-		right.add_child(UI.button("原地防御", action_defend, 14, Vector2(170, 38)))
-		right.add_child(UI.button("等待", action_wait, 14, Vector2(170, 38)))
 	right.add_child(UI.ghost_button("关闭", hide_sheet, 14))
 
-# ==================================================================== 查看 / 指令入口
+# ==================================================================== 输入
 func cell_at_screen(p: Vector2) -> Vector2i:
 	var hit := ground_hit(p, ELEV + 0.05)
 	var cell := Hex3D.from_world(hit, HEX_S)
@@ -1019,21 +1455,25 @@ func on_tap(pos: Vector2) -> void:
 	if c.x < 0:
 		hide_sheet()
 		return
+	# 点亮普攻/技能时，左键直接对目标释放
+	if pending_skill != "":
+		use_pending(c)
+		return
 	var idx := stack_at(c)
 	if idx < 0:
-		hide_sheet()
+		if active >= 0:
+			deselect()
+		else:
+			hide_sheet()
+		return
+	if int(stacks[idx].side) == 0:
+		if active < 0:
+			select_unit(idx)
+		else:
+			hint.text = "已选中 %s，先结束其行动" % DB.UNITS[stacks[active].unit].name
 		return
 	inspect_idx = idx
 	show_sheet()
-
-func on_command(pos: Vector2) -> void:
-	cmd_cell = Vector2i(-1, -1)
-	var c := cell_at_screen(pos)
-	if c.x < 0:
-		build_overlay()
-		return
-	command_at(c)
-	build_overlay()
 
 func on_command_hover(pos: Vector2) -> void:
 	var c := cell_at_screen(pos)
@@ -1050,4 +1490,6 @@ func on_hover(pos: Vector2) -> void:
 	var c := cell_at_screen(pos)
 	if c != hover_cell:
 		hover_cell = c
+		if pending_skill != "":
+			cmd_cell = c
 		build_overlay()

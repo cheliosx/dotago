@@ -152,6 +152,65 @@ const SKILLS := {
 	"leadership": {"name": "统帅",   "icon": "帅", "desc": "每级 +6% 全军伤害、"},
 }
 
+# ---------------------------------------------------------------- 战场技能
+# 每个兵种都有「普攻 + 4 技能」。技能按兵种定位分配，伤害 = 数量 × 单体攻击 × mult。
+# type: single 单体 / aoe 目标格及半径内 / line 同一排 / heal 治疗友军 / buff_self 自身增益
+# cd: 冷却回合数（每回合开始 -1）
+const UNIT_SKILL_SETS := {
+	"melee":   ["heavy_blow", "cleave", "warcry", "brace"],
+	"ranged":  ["aimed_shot", "arrow_rain", "pin_shot", "volley"],
+	"caster":  ["arcane_blast", "frost_burst", "mend", "siphon"],
+	"heavy":   ["crush", "quake", "taunt", "thorns"],
+	"assault": ["charge", "dive", "wind_blade", "breath"],
+}
+
+const UNIT_SKILLS := {
+	"heavy_blow":   {"name": "猛击",   "type": "single", "mult": 1.60, "radius": 0, "cd": 2, "range": 1, "color": "#e0a060", "desc": "对单体造成 160% 伤害，不触发反击。"},
+	"cleave":       {"name": "横扫",   "type": "aoe",    "mult": 0.75, "radius": 1, "cd": 3, "range": 1, "color": "#e0a060", "desc": "劈砍目标及其相邻格的所有敌人。"},
+	"warcry":       {"name": "战吼",   "type": "buff_self", "mult": 0, "radius": 0, "cd": 4, "range": 1, "atk": 3, "color": "#d8b45a", "desc": "本场战斗攻击 +3（部队永久增益）。"},
+	"brace":        {"name": "固守",   "type": "buff_self", "mult": 0, "radius": 0, "cd": 3, "range": 1, "def": 4, "color": "#8fd6a0", "desc": "本场战斗防御 +4，并立刻获得防御姿态。"},
+
+	"aimed_shot":   {"name": "精准射击", "type": "single", "mult": 1.50, "radius": 0, "cd": 2, "range": 6, "color": "#8fd6a0", "desc": "对 6 格内单体造成 150% 伤害。"},
+	"arrow_rain":   {"name": "箭雨",   "type": "aoe",    "mult": 0.70, "radius": 1, "cd": 3, "range": 6, "color": "#8fd6a0", "desc": "覆盖目标格及相邻六格的敌人。"},
+	"pin_shot":     {"name": "钉刺",   "type": "single", "mult": 1.00, "radius": 0, "cd": 3, "range": 6, "slow": 4, "color": "#8fd6a0", "desc": "造成伤害并让其速度 -4，持续到战斗结束。"},
+	"volley":       {"name": "齐射",   "type": "line",   "mult": 0.85, "radius": 0, "cd": 4, "range": 6, "color": "#8fd6a0", "desc": "攒射目标所在的一整排敌人。"},
+
+	"arcane_blast": {"name": "奥术冲击", "type": "single", "mult": 1.80, "radius": 0, "cd": 2, "range": 5, "color": "#b9a7ef", "desc": "对单体造成 180% 魔法伤害。"},
+	"frost_burst":  {"name": "冰霜爆裂", "type": "aoe",    "mult": 0.90, "radius": 1, "cd": 3, "range": 5, "slow": 3, "color": "#86c9e0", "desc": "范围伤害并使目标减速。"},
+	"mend":         {"name": "治疗",   "type": "heal",   "mult": 0.60, "radius": 0, "cd": 3, "range": 5, "color": "#78c48a", "desc": "治疗一支友军，补回约 60% 攻击力的兵力。"},
+	"siphon":       {"name": "法力虹吸", "type": "single", "mult": 1.20, "radius": 0, "cd": 4, "range": 5, "mana": 4, "color": "#b48ae0", "desc": "造成伤害，同时为英雄回复 4 点魔法。"},
+
+	"crush":        {"name": "碾压",   "type": "single", "mult": 1.70, "radius": 0, "cd": 2, "range": 1, "color": "#b08a63", "desc": "沉重的单体打击，170% 伤害。"},
+	"quake":        {"name": "地震",   "type": "aoe",    "mult": 0.60, "radius": 2, "cd": 4, "range": 2, "color": "#b08a63", "desc": "两格半径内的敌人全部受伤。"},
+	"taunt":        {"name": "嘲讽",   "type": "buff_self", "mult": 0, "radius": 0, "cd": 3, "range": 1, "def": 6, "color": "#8fd6a0", "desc": "防御 +6 并进入防御姿态，硬扛一轮。"},
+	"thorns":       {"name": "荆棘护甲", "type": "buff_self", "mult": 0, "radius": 0, "cd": 4, "range": 1, "def": 3, "color": "#6fa15a", "desc": "防御 +3，反击伤害提升。"},
+
+	"charge":       {"name": "冲锋",   "type": "single", "mult": 1.40, "radius": 0, "cd": 2, "range": 3, "color": "#e3e9f2", "desc": "冲向 3 格内的敌人并造成伤害。"},
+	"dive":         {"name": "俯冲",   "type": "single", "mult": 1.65, "radius": 0, "cd": 3, "range": 4, "color": "#8c93a0", "desc": "从空中俯冲，165% 伤害。"},
+	"wind_blade":   {"name": "风刃",   "type": "line",   "mult": 0.80, "radius": 0, "cd": 3, "range": 5, "color": "#86c9e0", "desc": "一道风刃贯穿目标所在的一排。"},
+	"breath":       {"name": "龙息",   "type": "aoe",    "mult": 1.00, "radius": 1, "cd": 4, "range": 4, "color": "#e0645c", "desc": "喷吐烈焰，灼烧目标格及相邻格。"},
+}
+
+## 兵种定位：决定它拿哪一套 4 技能
+static func unit_archetype(uid: String) -> String:
+	if not UNITS.has(uid):
+		return "melee"
+	var u: Dictionary = UNITS[uid]
+	var tr := String(u.get("trait", ""))
+	if tr == "飞行" or tr == "冲锋" or tr == "龙息":
+		return "assault"
+	if int(u.range) > 2:
+		if int(u.tier) >= 3 and int(u.atk) <= 7:
+			return "caster"
+		return "ranged"
+	if int(u.tier) >= 4 and int(u.def) >= 7:
+		return "heavy"
+	return "melee"
+
+static func unit_skills(uid: String) -> Array:
+	return UNIT_SKILL_SETS.get(unit_archetype(uid), UNIT_SKILL_SETS["melee"])
+
+
 # ---------------------------------------------------------------- 装备
 const SLOTS := ["weapon", "armor", "helm", "boots", "trinket", "book"]
 const SLOT_NAMES := {"weapon": "武器", "armor": "护甲", "helm": "头盔", "boots": "靴子", "trinket": "饰品", "book": "法书"}
