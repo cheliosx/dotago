@@ -35,7 +35,6 @@ var log_lines := []
 var mana := 0
 var rng := RandomNumberGenerator.new()
 var pending_skill := ""   # "" / "attack" / "skill:<id>" / "spell:<id>"
-var moved_once := false
 var anim_lock := false
 
 # ---------------------------------------------------------------- 三维节点
@@ -161,7 +160,23 @@ func build_overlay() -> void:
 		var armed := pending_skill != ""
 		var col := Color(1.0, 0.55, 0.35, 1.0) if armed else Color(0.88, 0.36, 0.32, 0.9)
 		Hex3D.add_outline(st, s.pos, HEX_S, 0.90, ELEV + 0.035, col, 0.11 if armed else 0.09)
-	# 技能范围预览
+	# 点亮普攻 / 技能后：把「能打到的范围」整体铺出来
+	if pending_skill != "" and active >= 0:
+		var rng := _pending_range()
+		if rng > 0:
+			var area := {}
+			var sp: Vector2i = stacks[active].pos
+			for yy in range(BROWS):
+				for xx in range(BCOLS):
+					var cc := Vector2i(xx, yy)
+					if cc == sp or Hex.dist(sp, cc) > rng:
+						continue
+					area[Hex.key(cc)] = true
+					Hex3D.add_face(st, cc, HEX_S, 0.86, ELEV + 0.035, Color(1.0, 0.42, 0.30, 0.16))
+			if area.size() > 0:
+				add_region_edges(st, area, HEX_S, func(_c: Vector2i) -> float: return ELEV + 0.042,
+					Color(1.0, 0.52, 0.34, 0.95), 0.09)
+	# 范围技能（aoe）的落点预览
 	if pending_skill != "":
 		var rad := _pending_radius()
 		if rad > 0 and cmd_cell.x >= 0:
@@ -263,11 +278,7 @@ func sync_units() -> void:
 		unit_hp_frac[idx] = clampf(float(s.top_hp) / float(maxf(1, int(u.hp))), 0.0, 1.0)
 		var ring: Node3D = unit_rings[idx]
 		ring.visible = idx == active
-		var tag := ""
-		if s.defending:
-			tag = "防"
-		elif int(s.buff_def) > 0:
-			tag = "霜"
+		var tag := "防" if s.defending else ""
 		var badge: Node = unit_holders[idx].get_node_or_null("Badge")
 		if tag == "":
 			if badge != null:
@@ -306,6 +317,10 @@ func _process(delta: float) -> void:
 		var nx: float = lerpf(cur, target, minf(1.0, delta * 7.0))
 		fill.scale.x = 0.70 * nx
 		fill.position.x = -0.35 * (1.0 - nx)
+	# 技能已点亮：选中单位的金环做呼吸式放大，提示「正在选目标」
+	if pending_skill != "" and active >= 0 and unit_rings.has(active):
+		var pulse := 1.0 + 0.12 * (0.5 + 0.5 * sin(float(Time.get_ticks_msec()) * 0.009))
+		(unit_rings[active] as Node3D).scale = Vector3(pulse, 1.0, pulse)
 
 # ==================================================================== 规则
 func setup_stacks() -> void:
@@ -331,10 +346,12 @@ func setup_stacks() -> void:
 
 func make_stack(idx: int, uid: String, count: int, side_id: int, pos: Vector2i) -> Dictionary:
 	var u: Dictionary = DB.UNITS[uid]
+	# 被动技能：开局永久加成攻击 / 防御 / 速度
+	var ps: Dictionary = DB.unit_passive(uid)
 	return {"idx": idx, "unit": uid, "count": maxi(1, count), "top_hp": int(u.hp),
 			"side": side_id, "pos": pos, "acted": false, "retaliated": false,
-			"defending": false, "waited": false, "buff_def": 0, "slow": 0,
-			"atk_bonus": 0, "cd": {}}
+			"defending": false, "waited": false, "buff_def": int(ps.get("def", 0)), "slow": 0,
+			"atk_bonus": int(ps.get("atk", 0)), "spd_bonus": int(ps.get("spd", 0)), "cd": {}}
 
 func side_hero_stats(side_id: int) -> Dictionary:
 	if side_id == 0:
@@ -349,7 +366,7 @@ func side_skill(side_id: int, key: String) -> int:
 
 func eff_speed(s: Dictionary) -> int:
 	var u: Dictionary = DB.UNITS[s.unit]
-	return int(u.spd) + int(side_hero_stats(s.side).spd) - int(s.slow)
+	return int(u.spd) + int(side_hero_stats(s.side).spd) - int(s.slow) + int(s.get("spd_bonus", 0))
 
 func eff_atk(s: Dictionary) -> int:
 	return int(DB.UNITS[s.unit].atk) + int(s.get("atk_bonus", 0))
@@ -424,7 +441,7 @@ func recompute_reach() -> void:
 	reach = {}
 	if active < 0 or int(stacks[active].side) != 0:
 		return
-	if moved_once or pending_skill != "":
+	if pending_skill != "":
 		return
 	var s: Dictionary = stacks[active]
 	var u: Dictionary = DB.UNITS[s.unit]
@@ -488,7 +505,6 @@ func select_unit(idx: int) -> void:
 		hint.text = "现在还不能行动"
 		return
 	active = idx
-	moved_once = false
 	pending_skill = ""
 	recompute_reach()
 	center_on(_cell_pos(s.pos))
@@ -500,7 +516,6 @@ func deselect() -> void:
 		return
 	active = -1
 	pending_skill = ""
-	moved_once = false
 	reach = {}
 	hint.text = "点击我方单位选择行动"
 	refresh_view()
@@ -541,7 +556,6 @@ func _do_move(idx: int, dest: Vector2i) -> void:
 	anim_lock = true
 	anim_ignore[idx] = true
 	s.pos = dest
-	moved_once = true
 	reach = {}
 	refresh_view()
 	await move_along(idx, path)
@@ -549,8 +563,9 @@ func _do_move(idx: int, dest: Vector2i) -> void:
 	anim_lock = false
 	pending_skill = ""
 	center_on(_cell_pos(dest))
-	hint.text = "%s 已移动：可选目标攻击，或点「结束行动」" % DB.UNITS[s.unit].name
-	refresh_view()
+	# 一次行动只能做一件事：移动完就结束，不能再攻击
+	hint.text = "%s 移动完毕，本回合行动结束" % DB.UNITS[s.unit].name
+	end_action()
 
 func _path_from_reach(from: Vector2i, to: Vector2i) -> Array:
 	if not reach.has(Hex.key(to)):
@@ -608,6 +623,17 @@ func arm_skill(sid: String) -> void:
 		nm = String(DB.UNIT_SKILLS[sid].name)
 	hint.text = "已选择「%s」：点击 / 右键 目标" % nm
 	refresh_view()
+
+func _pending_range() -> int:
+	if active < 0:
+		return 0
+	if pending_skill == "attack":
+		return int(DB.UNITS[stacks[active].unit].range)
+	if pending_skill.begins_with("skill:"):
+		return int(DB.UNIT_SKILLS.get(pending_skill.substr(6), {}).get("range", 1))
+	if pending_skill.begins_with("spell:"):
+		return 6
+	return 0
 
 func _pending_radius() -> int:
 	if pending_skill == "attack" or pending_skill == "":
@@ -921,7 +947,6 @@ func end_action() -> void:
 		stacks[active].acted = true
 	active = -1
 	pending_skill = ""
-	moved_once = false
 	turn_idx += 1
 	reach = {}
 	next_turn()
@@ -1061,9 +1086,12 @@ func ai_act(idx: int) -> void:
 		end_action()
 		return
 	var d := Hex.dist(s.pos, stacks[target].pos)
-	if int(u.range) > 1 and d >= 2 and d <= int(u.range) and not has_adjacent_enemy(s):
-		await _strike(idx, target, true)
-		attack(idx, target, true)
+	var rng := int(u.range)
+	# AI 与玩家同规则：一次行动只能打或只能走
+	if d <= rng:
+		var shot := rng > 1 and d >= 2
+		await _strike(idx, target, shot)
+		attack(idx, target, shot)
 	else:
 		var one := func(_c: Vector2i) -> int: return 1
 		var free_fn := func(c: Vector2i) -> bool: return cell_free(c)
@@ -1086,10 +1114,6 @@ func ai_act(idx: int) -> void:
 				await move_along(idx, path)
 				anim_ignore.erase(idx)
 				refresh_view()
-		if Hex.dist(s.pos, stacks[target].pos) <= 1 or (int(u.range) > 1 and Hex.dist(s.pos, stacks[target].pos) <= int(u.range)):
-			var shot := int(u.range) > 1 and Hex.dist(s.pos, stacks[target].pos) > 1
-			await _strike(idx, target, shot)
-			attack(idx, target, shot)
 	busy = false
 	if check_end():
 		return
@@ -1356,32 +1380,49 @@ func _build_actions() -> void:
 		action_row.add_child(br0)
 		return
 	var s: Dictionary = stacks[active]
-	var atk_btn := UI.button("普攻", Callable(self, "arm_skill").bind("attack"), 15, Vector2(76, 46), UI.C_GOLD)
+	var atk_btn := UI.button("普攻", Callable(self, "arm_skill").bind("attack"), 15, Vector2(96, 48), UI.C_GOLD)
 	atk_btn.disabled = not can
-	atk_btn.tooltip_text = "直接攻击目标（近战会被反击）"
+	atk_btn.tooltip_text = "普通攻击（近战会被反击）\n射程 %d 格" % int(DB.UNITS[s.unit].range)
 	if pending_skill == "attack":
-		atk_btn.text = "◆普攻"
+		atk_btn.text = "◆ 普攻 · 选目标"
+		atk_btn.add_theme_stylebox_override("normal", UI.sb(Color("#4a3212"), Color("#ffc65a"), 5, 2))
+		atk_btn.add_theme_stylebox_override("hover", UI.sb(Color("#5a3d16"), Color("#ffd77a"), 5, 2))
 	action_row.add_child(atk_btn)
-	# 4 个兵种技能
-	for sid in DB.unit_skills(s.unit):
-		var sd: Dictionary = DB.UNIT_SKILLS[sid]
-		var cd := int(s.cd.get(sid, 0))
-		var txt := String(sd.name)
+	# 唯一的主动技能
+	var asid := DB.unit_active(s.unit)
+	if DB.UNIT_SKILLS.has(asid):
+		var sd: Dictionary = DB.UNIT_SKILLS[asid]
+		var cd := int(s.cd.get(asid, 0))
+		var txt := "◆ " + String(sd.name)
 		if cd > 0:
 			txt += "  CD %d" % cd
-		var b := UI.button(txt, Callable(self, "arm_skill").bind(sid), 13, Vector2(104, 46), Color(sd.get("color", "#b48ae0")))
-		b.disabled = (not can) or cd > 0
-		b.tooltip_text = "%s\n%s\n冷却 %d 回合" % [String(sd.name), String(sd.desc), int(sd.cd)]
-		if pending_skill == "skill:" + sid:
-			b.text = "◆" + String(sd.name)
-		action_row.add_child(b)
+		var ab := UI.button(txt, Callable(self, "arm_skill").bind(asid), 14, Vector2(126, 48), Color(sd.get("color", "#b48ae0")))
+		ab.disabled = (not can) or cd > 0
+		ab.tooltip_text = "%s\n%s\n射程 %d 格 · 冷却 %d 回合" % [
+			String(sd.name), String(sd.desc), int(sd.get("range", 1)), int(sd.cd)]
+		if pending_skill == "skill:" + asid:
+			ab.text = "◆ " + String(sd.name) + " · 选目标"
+			ab.add_theme_stylebox_override("normal", UI.sb(Color("#3a2450"), Color("#d8a6ff"), 5, 2))
+			ab.add_theme_stylebox_override("hover", UI.sb(Color("#472c60"), Color("#e8c0ff"), 5, 2))
+		action_row.add_child(ab)
+	# 被动技能：只展示，不可点
+	var ps: Dictionary = DB.unit_passive(s.unit)
+	if not ps.is_empty():
+		var chip := UI.panel(Color("#1f2a33"), UI.C_GREEN, 5)
+		chip.custom_minimum_size = Vector2(176, 48)
+		var cv := UI.vbox(2)
+		chip.add_child(cv)
+		cv.add_child(UI.label("被动 · " + String(ps.name), 12, UI.C_GREEN))
+		cv.add_child(UI.label(String(ps.desc), 10, UI.C_MUTED))
+		chip.tooltip_text = "被动技能，开局自动生效"
+		action_row.add_child(chip)
 	var sp := Control.new()
 	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	action_row.add_child(sp)
-	var bd := UI.button("防御", action_defend, 13, Vector2(72, 46), UI.C_MUTED)
+	var bd := UI.button("防御", action_defend, 13, Vector2(72, 48), UI.C_MUTED)
 	bd.disabled = not can
 	action_row.add_child(bd)
-	var be := UI.button("结束行动", end_action, 13, Vector2(88, 46), UI.C_MUTED)
+	var be := UI.button("结束行动", end_action, 13, Vector2(88, 48), UI.C_MUTED)
 	be.disabled = not can
 	action_row.add_child(be)
 	var ba := UI.button("自动战斗", auto_battle, 12, Vector2(104, 40), UI.C_GREEN)
@@ -1430,13 +1471,16 @@ func fill_sheet() -> void:
 	mid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(mid)
 	mid.add_child(UI.label("技 能", 13, UI.C_MUTED))
-	if int(s.side) == 0:
-		for sid in DB.unit_skills(s.unit):
-			var sd: Dictionary = DB.UNIT_SKILLS[sid]
-			var cd := int(s.cd.get(sid, 0))
-			mid.add_child(nowrap("%s%s — %s" % [String(sd.name), ("（CD %d）" % cd) if cd > 0 else "", String(sd.desc)], 11, Color(sd.get("color", "#b48ae0"))))
-	else:
-		mid.add_child(nowrap("敌方部队的技能无法查看", 12, UI.C_MUTED))
+	var asid := DB.unit_active(s.unit)
+	if DB.UNIT_SKILLS.has(asid):
+		var sd: Dictionary = DB.UNIT_SKILLS[asid]
+		var cd := int(s.cd.get(asid, 0))
+		mid.add_child(nowrap("主动 · %s%s（射程 %d 格，CD %d）" % [String(sd.name),
+			("，剩 %d 回合" % cd) if cd > 0 else "，可用", int(sd.get("range", 1)), int(sd.cd)], 12, Color(sd.get("color", "#b48ae0"))))
+		mid.add_child(nowrap(String(sd.desc), 11, UI.C_TEXT))
+	var ps: Dictionary = DB.unit_passive(s.unit)
+	if not ps.is_empty():
+		mid.add_child(nowrap("被动 · %s — %s" % [String(ps.name), String(ps.desc)], 12, UI.C_GREEN))
 	var right := UI.vbox(8)
 	right.custom_minimum_size = Vector2(170, 0)
 	row.add_child(right)
