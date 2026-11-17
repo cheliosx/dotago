@@ -133,6 +133,7 @@ func _on_goto(view: String, payload: Dictionary) -> void:
 	var v: Control
 	match view:
 		"title":  v = TitleView.new()
+		"create": v = CreateHeroView.new()
 		"world":  v = World3DView.new()
 		"world2d": v = WorldView.new()
 		"town":   v = TownView.new()

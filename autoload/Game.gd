@@ -32,12 +32,13 @@ var pending_battle := {}
 var game_over := ""
 var ai_power := 0
 var turn_busy := false
+var save_slot := ""   # 当前存档 id（对应 autoload/Saves 里的文件）
 
 # ------------------------------------------------------------------ 初始化
 func _ready() -> void:
 	rng.randomize()
 
-func new_game(hero_key: String) -> void:
+func new_game(hero_key: String, hero_name: String = "") -> void:
 	rng.randomize()
 	day = 1
 	res = {"gold": 6500, "wood": 22, "ore": 16, "crystal": 8, "essence": 3}
@@ -62,6 +63,9 @@ func new_game(hero_key: String) -> void:
 	var start := Vector2i(4, 13)
 	force_clear(start)
 	var h := create_hero(hero_key, false, start)
+	var custom := hero_name.strip_edges()
+	if custom != "":
+		h.name = custom
 	selected = h.id
 	var eh1 := create_hero("skeleton_king", true, Vector2i(20, 2))
 	eh1.army = [{"unit": "ghoul", "count": 26}, {"unit": "skeleton_archer", "count": 12}, {"unit": "ogre", "count": 4}]
@@ -771,6 +775,9 @@ func end_turn() -> void:
 	compute_vision()
 	check_game_over()
 	turn_busy = false
+	# 每回合自动落盘，防止忘记存档丢进度
+	if save_slot != "" and game_over == "":
+		Saves.save_game(save_slot)
 	toast.emit("第 %d 天 · 回合结算完成" % day)
 	changed.emit()
 
@@ -875,6 +882,34 @@ func objective() -> String:
 		if t.owner == faction:
 			town_count += 1
 	return "已占领 %d/%d 座矿场 · %d/%d 座城镇 · 第 %d 天" % [mine_count, mines.size(), town_count, towns.size(), day]
+
+# ------------------------------------------------------------------ 存档
+## 从存档还原（写档在 autoload/Saves.gd，这里只负责读回来）。
+## 可见格不存盘：载入后按英雄与城镇位置重算，省得存档还带着过期视野。
+func restore(d: Dictionary) -> void:
+	day = int(d.get("day", 1))
+	res = (d.get("res", {}) as Dictionary).duplicate(true)
+	tiles = (d.get("tiles", {}) as Dictionary).duplicate(true)
+	towns = (d.get("towns", []) as Array).duplicate(true)
+	mines = (d.get("mines", []) as Array).duplicate(true)
+	camps = (d.get("camps", []) as Array).duplicate(true)
+	caches = (d.get("caches", []) as Array).duplicate(true)
+	heroes = (d.get("heroes", []) as Array).duplicate(true)
+	explored = (d.get("explored", {}) as Dictionary).duplicate(true)
+	journal = (d.get("journal", []) as Array).duplicate(true)
+	inventory = (d.get("inventory", []) as Array).duplicate(true)
+	id_counter = int(d.get("id_counter", 1))
+	selected = int(d.get("selected", 0))
+	faction = String(d.get("faction", "sentinel"))
+	enemy_faction = String(d.get("enemy_faction", "scourge"))
+	ai_power = int(d.get("ai_power", 0))
+	# 战斗态不入档：清掉临时状态，保证载入后一定能从大地图继续
+	pending_battle = {}
+	game_over = ""
+	turn_busy = false
+	visible_cells.clear()
+	compute_vision()
+	changed.emit()
 
 # ------------------------------------------------------------------ 工具
 func add_log(s: String) -> void:

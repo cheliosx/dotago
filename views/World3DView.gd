@@ -32,6 +32,7 @@ var _end_shown := false
 
 # --- 查看目标 / 指令目标 ---
 var inspect := {"kind": "", "id": 0}
+var menu_layer: Control = null
 var hover_cell := Vector2i(-1, -1)
 var cmd_cell := Vector2i(-1, -1)
 
@@ -414,6 +415,7 @@ func _build_hud() -> void:
 	hud.add_child(UI.ghost_button("－", func(): zoom_by(1.25), 16))
 	hud.add_child(UI.ghost_button("＋", func(): zoom_by(0.8), 16))
 	hud.add_child(UI.ghost_button("◎", _center_hero, 16))
+	hud.add_child(UI.ghost_button("☰", _open_menu, 16))
 	hud.add_child(UI.ghost_button("城镇", _open_town, 14))
 	hud.add_child(UI.ghost_button("图鉴", func(): Game.goto("codex", {}), 14))
 	hud.add_child(UI.ghost_button("英雄", _open_hero_panel, 14))
@@ -447,6 +449,61 @@ func _end_turn() -> void:
 	Game.end_turn()
 	if Game.game_over != "":
 		_show_end()
+
+# ------------------------------------------------------------------ ☰ 菜单
+func _open_menu() -> void:
+	if is_instance_valid(menu_layer):
+		return
+	hide_sheet()
+	var shade := ColorRect.new()
+	shade.color = Color(0, 0, 0, 0.62)
+	shade.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	shade.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(shade)
+	menu_layer = shade
+	var center := CenterContainer.new()
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	shade.add_child(center)
+	var card := UI.panel(Color("#1c2231"), UI.C_GOLD, 10)
+	card.custom_minimum_size = Vector2(420, 0)
+	center.add_child(card)
+	var v := UI.vbox(12)
+	card.add_child(v)
+	v.add_child(UI.title("战役菜单", 26))
+	v.add_child(UI.line(UI.C_GOLD_DIM))
+	var h := Game.selected_hero()
+	if not h.is_empty():
+		v.add_child(nowrap("%s  Lv.%d  ·  第 %d 天" % [h.name, h.level, Game.day], 15, Color(h.color)))
+	v.add_child(UI.button("保存进度", _save_now, 16, Vector2(0, 44)))
+	v.add_child(UI.button("返回标题（存档列表）", _back_to_title, 16, Vector2(0, 44), UI.C_MUTED))
+	v.add_child(UI.ghost_button("玩法说明", _show_help, 14))
+	v.add_child(UI.ghost_button("关闭", _close_menu, 14))
+
+func _close_menu() -> void:
+	if is_instance_valid(menu_layer):
+		menu_layer.queue_free()
+	menu_layer = null
+
+func _save_now() -> void:
+	var id := Saves.save_game(Game.save_slot)
+	if id == "":
+		Game.say("存档失败：无法写入 user://saves")
+		return
+	_close_menu()
+	Game.say("已保存 · 第 %d 天" % Game.day)
+
+func _back_to_title() -> void:
+	Saves.save_game(Game.save_slot)
+	_close_menu()
+	Game.goto("title", {})
+
+func _show_help() -> void:
+	_close_menu()
+	Game.dialog("玩法说明",
+		"【大地图】左键点击 / 单指点按 = 查看；点空白关闭面板。右键点击 / 单指按住拖动 = 行军或进攻。双指拖动平移、捏合缩放。\n\n" +
+		"【战场】点击查看部队，右键或按住拖动下指令；远程单位被贴身时伤害减半，英雄每回合可施法一次。\n\n" +
+		"【存档】每结束一个回合会自动保存，也可在 ☰ 菜单里手动存档。一份存档 = 一位英雄的一局战役。")
 
 func _show_end() -> void:
 	if not is_inside_tree() or Game.game_over == "" or _end_shown:

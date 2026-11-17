@@ -116,6 +116,42 @@ func _process(_delta) -> bool:
 				G.end_turn()
 			note("三个回合后：第%d天 金币%d 日志%d条 迷雾%d格" % [G.day, G.res.gold, G.journal.size(), G.explored.size()])
 		8:
+			# 存档回归：创建 → 列目录 → 改状态 → 读回 → 删除
+			var S = root.get_node_or_null("/root/Saves")
+			note("autoload Saves 可用 = " + str(S != null))
+			if S != null:
+				var id: String = S.save_game("")
+				var saves: Array = S.list()
+				note("手动存档 id=%s，存档数=%d，英雄=%s 第%d天" % [id, saves.size(),
+					saves[0].get("hero_name", "?"), int(saves[0].get("day", 0))])
+				var name_before: String = G.selected_hero().name
+				var day_before: int = G.day
+				var gold_before: int = int(G.res.gold)
+				G.day += 5
+				G.res.gold = 123
+				var ok: bool = S.load_game(id)
+				note("读档 = %s，英雄=%s（应=%s）第%d天（应=%d）金币=%d（应=%d）" % [
+					str(ok), G.selected_hero().name, name_before, G.day, day_before, int(G.res.gold), gold_before])
+				# 创建英雄 = 新存档，名字必须用输入的
+				var id2: String = S.new_game("luna", "测试英雄")
+				note("创建英雄存档 = %s，名字=%s 存档数=%d" % [id2, G.selected_hero().name, S.list().size()])
+				var sz := FileAccess.open("user://saves/%s.sav" % id2, FileAccess.READ)
+				note("存档文件大小 = %d 字节" % (sz.get_length() if sz != null else -1))
+				if sz != null:
+					sz.close()
+				# 自动存档：结束回合后应把新的一天写回同一份存档
+				G.end_turn()
+				var day_now: int = G.day
+				var reread := {}
+				for m in S.list():
+					if String(m.id) == id2:
+						reread = m
+				note("自动存档后 存档内第%d天（会话第%d天）= %s" % [
+					int(reread.get("day", -1)), day_now, str(int(reread.get("day", -1)) == day_now)])
+				S.delete_save(id)
+				S.delete_save(id2)
+				note("清理后存档数 = %d" % S.list().size())
+		9:
 			note("=== 集成测试完成，共 %d 步 ===" % stage)
 			return true
 	return false

@@ -21,6 +21,7 @@ config/icon="res://icon.svg"
 [autoload]
 
 Game="*res://autoload/Game.gd"
+Saves="*res://autoload/Saves.gd"
 
 [display]
 
