@@ -7,9 +7,9 @@ signal goto_view(view: String, payload: Dictionary)
 signal toast(text: String)
 signal popup(title: String, body: String, cb: Callable)
 
-const COLS := 16
-const ROWS := 11
-const VISION := 3
+const COLS := 26
+const ROWS := 17
+const VISION := 4
 
 var rng := RandomNumberGenerator.new()
 var day := 1
@@ -59,17 +59,23 @@ func new_game(hero_key: String) -> void:
 	generate_terrain()
 	place_world()
 
-	var start := Vector2i(3, 8)
+	var start := Vector2i(4, 13)
 	force_clear(start)
 	var h := create_hero(hero_key, false, start)
 	selected = h.id
-	var eh1 := create_hero("skeleton_king", true, Vector2i(12, 2))
+	var eh1 := create_hero("skeleton_king", true, Vector2i(20, 2))
 	eh1.army = [{"unit": "ghoul", "count": 26}, {"unit": "skeleton_archer", "count": 12}, {"unit": "ogre", "count": 4}]
-	var eh2 := create_hero("lich", true, Vector2i(13, 3))
+	var eh2 := create_hero("lich", true, Vector2i(22, 4))
 	eh2.army = [{"unit": "ghoul", "count": 18}, {"unit": "skeleton_archer", "count": 18}, {"unit": "necromancer", "count": 5}]
 
 	add_log("第 1 天 · %s 在银月城接过近卫军团的旌旗。" % h.name)
 	add_log("目标：夺取矿脉、扩张城镇、击溃天灾军团。")
+	# 大图上开局先给一片已知区域，否则只剩脚下几格亮着，看不出地形骨架
+	for src in [start, Vector2i(3, 13)]:
+		for key in tiles:
+			var cc: Vector2i = tiles[key].c
+			if Hex.dist(src, cc) <= 6:
+				explored[key] = true
 	compute_vision()
 	changed.emit()
 
@@ -91,9 +97,11 @@ func generate_terrain() -> void:
 				t = "water"
 			tiles[Hex.key(c)] = {"c": c, "t": t}
 	# 保证两座主城之间有一条可通行的古道
-	make_road(Vector2i(3, 8), Vector2i(7, 5))
-	make_road(Vector2i(7, 5), Vector2i(12, 2))
-	make_road(Vector2i(7, 5), Vector2i(10, 8))
+	make_road(Vector2i(4, 13), Vector2i(12, 9))
+	make_road(Vector2i(12, 9), Vector2i(21, 3))
+	make_road(Vector2i(12, 9), Vector2i(18, 13))
+	make_road(Vector2i(12, 9), Vector2i(10, 16))
+	make_road(Vector2i(12, 9), Vector2i(8, 4))
 
 func make_road(a: Vector2i, b: Vector2i) -> void:
 	var steps: int = maxi(absi(b.x - a.x), absi(b.y - a.y))
@@ -111,32 +119,41 @@ func force_clear(c: Vector2i) -> void:
 
 func place_world() -> void:
 	towns = [
-		make_town("银月城", Vector2i(2, 8), "sentinel", {"hall": 1, "tavern": 1}),
-		make_town("寒骸堡", Vector2i(13, 2), "scourge", {"hall": 2, "barracks": 1}),
-		make_town("灰谷哨站", Vector2i(7, 5), "neutral", {"hall": 1, "barracks": 1}),
-		make_town("遗迹之城", Vector2i(11, 8), "neutral", {"hall": 1, "mage_tower": 1}),
+		make_town("银月城", Vector2i(3, 13), "sentinel", {"hall": 1, "tavern": 1}),
+		make_town("寒骸堡", Vector2i(21, 3), "scourge", {"hall": 2, "barracks": 1}),
+		make_town("灰谷哨站", Vector2i(12, 9), "neutral", {"hall": 1, "barracks": 1}),
+		make_town("遗迹之城", Vector2i(18, 13), "neutral", {"hall": 1, "mage_tower": 1}),
 	]
 	mines = [
-		make_mine("gold", Vector2i(4, 9), []),
-		make_mine("wood", Vector2i(1, 4), [{"unit": "kobold", "count": 14}]),
-		make_mine("ore", Vector2i(5, 2), [{"unit": "wolf", "count": 8}]),
-		make_mine("crystal", Vector2i(9, 1), [{"unit": "golem", "count": 4}]),
-		make_mine("essence", Vector2i(14, 7), [{"unit": "ogre", "count": 7}]),
-		make_mine("gold", Vector2i(10, 4), [{"unit": "wolf", "count": 10}]),
-		make_mine("wood", Vector2i(13, 9), []),
-		make_mine("ore", Vector2i(3, 6), [{"unit": "kobold", "count": 18}]),
+		make_mine("gold", Vector2i(6, 14), []),
+		make_mine("wood", Vector2i(1, 8), [{"unit": "kobold", "count": 14}]),
+		make_mine("ore", Vector2i(9, 3), [{"unit": "wolf", "count": 8}]),
+		make_mine("crystal", Vector2i(16, 1), [{"unit": "golem", "count": 4}]),
+		make_mine("essence", Vector2i(23, 12), [{"unit": "ogre", "count": 7}]),
+		make_mine("gold", Vector2i(17, 7), [{"unit": "wolf", "count": 10}]),
+		make_mine("wood", Vector2i(21, 15), []),
+		make_mine("ore", Vector2i(4, 10), [{"unit": "kobold", "count": 18}]),
+		make_mine("gold", Vector2i(13, 12), [{"unit": "kobold", "count": 10}]),
+		make_mine("wood", Vector2i(20, 10), [{"unit": "wolf", "count": 9}]),
+		make_mine("crystal", Vector2i(25, 6), [{"unit": "golem", "count": 5}]),
+		make_mine("essence", Vector2i(8, 6), [{"unit": "golem", "count": 3}]),
 	]
 	camps = [
-		make_camp("腐化狼穴", Vector2i(6, 8), [{"unit": "wolf", "count": 9}], {"gold": 900, "crystal": 2}),
-		make_camp("食人魔营地", Vector2i(8, 3), [{"unit": "ogre", "count": 6}], {"gold": 1200, "ore": 5}),
-		make_camp("远古遗迹", Vector2i(12, 6), [{"unit": "golem", "count": 5}], {"gold": 1800, "essence": 3}),
-		make_camp("亡灵前哨", Vector2i(9, 9), [{"unit": "skeleton_archer", "count": 14}, {"unit": "ghoul", "count": 10}], {"gold": 1400}),
+		make_camp("腐化狼穴", Vector2i(10, 13), [{"unit": "wolf", "count": 9}], {"gold": 900, "crystal": 2}),
+		make_camp("食人魔营地", Vector2i(14, 5), [{"unit": "ogre", "count": 6}], {"gold": 1200, "ore": 5}),
+		make_camp("远古遗迹", Vector2i(19, 11), [{"unit": "golem", "count": 5}], {"gold": 1800, "essence": 3}),
+		make_camp("亡灵前哨", Vector2i(15, 15), [{"unit": "skeleton_archer", "count": 14}, {"unit": "ghoul", "count": 10}], {"gold": 1400}),
+		make_camp("冰霜裂隙", Vector2i(7, 4), [{"unit": "golem", "count": 4}, {"unit": "wolf", "count": 6}], {"gold": 1600, "crystal": 3}),
+		make_camp("蛛后巢穴", Vector2i(23, 7), [{"unit": "kobold", "count": 20}], {"gold": 1500, "wood": 6}),
+		make_camp("腐化墓园", Vector2i(18, 2), [{"unit": "ghoul", "count": 16}], {"gold": 1300}),
 	]
 	caches = [
-		make_cache("遗落的补给箱", Vector2i(4, 6), {"gold": 700, "wood": 5}),
-		make_cache("法师的遗物", Vector2i(8, 7), {"crystal": 4, "essence": 2}),
-		make_cache("商队残骸", Vector2i(11, 2), {"gold": 900}),
-		make_cache("符文石匣", Vector2i(2, 2), {"ore": 6, "crystal": 2}),
+		make_cache("遗落的补给箱", Vector2i(7, 12), {"gold": 700, "wood": 5}),
+		make_cache("法师的遗物", Vector2i(14, 10), {"crystal": 4, "essence": 2}),
+		make_cache("商队残骸", Vector2i(17, 4), {"gold": 900}),
+		make_cache("符文石匣", Vector2i(2, 4), {"ore": 6, "crystal": 2}),
+		make_cache("沉没的宝库", Vector2i(24, 15), {"gold": 1200, "crystal": 3}),
+		make_cache("巨魔的祭品", Vector2i(11, 6), {"essence": 2, "gold": 600}),
 	]
 	for o in towns + mines + camps + caches:
 		force_clear(o.pos)
@@ -151,7 +168,7 @@ func make_town(n: String, p: Vector2i, owner: String, b: Dictionary) -> Dictiona
 			"buildings": b.duplicate(true), "garrison": army, "guarded": army.size() > 0}
 
 func make_mine(r: String, p: Vector2i, guards: Array) -> Dictionary:
-	return {"id": next_id(), "kind": "mine", "name": DB.RES[r].name + "矿", "pos": p,
+	return {"id": next_id(), "kind": "mine", "name": DB.MINE_NAMES[r], "pos": p,
 			"res": r, "owner": "", "guards": guards.duplicate(true), "guarded": guards.size() > 0}
 
 func make_camp(n: String, p: Vector2i, guards: Array, reward: Dictionary) -> Dictionary:
@@ -307,10 +324,9 @@ func terrain(c: Vector2i) -> String:
 func terrain_cost(c: Vector2i) -> int:
 	return int(DB.TERRAIN[terrain(c)].cost)
 
-func object_at(c: Vector2i) -> Dictionary:
-	for h in heroes:
-		if h.alive and h.pos == c:
-			return {"kind": "hero", "ref": h}
+## 只查地面物件（城镇 / 矿场 / 营地 / 宝箱），不含英雄。
+## 英雄抵达后会站在该格上，若用 object_at 会先命中自己，导致抵达交互永远失效。
+func ground_at(c: Vector2i) -> Dictionary:
 	for t in towns:
 		if t.pos == c:
 			return {"kind": "town", "ref": t}
@@ -324,6 +340,13 @@ func object_at(c: Vector2i) -> Dictionary:
 		if ca.pos == c:
 			return {"kind": "cache", "ref": ca}
 	return {}
+
+## 格子上的对象；exclude_hero_id 用于「忽略站在该格上的某个英雄」。
+func object_at(c: Vector2i, exclude_hero_id: int = -1) -> Dictionary:
+	for h in heroes:
+		if h.alive and h.pos == c and int(h.id) != exclude_hero_id:
+			return {"kind": "hero", "ref": h}
+	return ground_at(c)
 
 func blocked(c: Vector2i) -> bool:
 	var o := object_at(c)
@@ -379,6 +402,8 @@ func reachable(h: Dictionary, budget: int = -1) -> Dictionary:
 	for c in frontier:
 		var base := 0 if c == h.pos else int(reach[Hex.key(c)])
 		for n in Hex.neighbors(c):
+			if n == h.pos:
+				continue
 			if not tiles.has(Hex.key(n)) or not blocked(n):
 				continue
 			if reach.has(Hex.key(n)) or extra.has(Hex.key(n)):
@@ -432,7 +457,12 @@ func move_hero(h: Dictionary, dest: Vector2i) -> bool:
 	return true
 
 func arrive(h: Dictionary, pos: Vector2i) -> void:
-	var o := object_at(pos)
+	# 英雄已站在 pos 上，必须先取地面物件；否则 object_at 会命中自己
+	var o := ground_at(pos)
+	if o.is_empty():
+		var other := object_at(pos, int(h.id))
+		if not other.is_empty() and other.kind == "hero":
+			o = other
 	if o.is_empty():
 		return
 	var ref: Dictionary = o.ref
@@ -844,7 +874,7 @@ func objective() -> String:
 	for t in towns:
 		if t.owner == faction:
 			town_count += 1
-	return "已占领 %d/8 座矿场 · %d/4 座城镇 · 第 %d 天" % [mine_count, town_count, day]
+	return "已占领 %d/%d 座矿场 · %d/%d 座城镇 · 第 %d 天" % [mine_count, mines.size(), town_count, towns.size(), day]
 
 # ------------------------------------------------------------------ 工具
 func add_log(s: String) -> void:

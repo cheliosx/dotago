@@ -13,6 +13,11 @@ const RES := {
 	"essence": {"name": "灵魂精华", "short": "魂", "color": "#c58be8", "daily": 1},
 }
 
+const MINE_NAMES := {
+	"gold": "金矿", "wood": "伐木场", "ore": "秘银矿脉",
+	"crystal": "水晶矿洞", "essence": "灵魂祭坛",
+}
+
 const FACTIONS := {
 	"sentinel": {"name": "近卫军团", "color": "#5fb8e8", "dark": "#16394f", "desc": "守护世界之树的秩序之师"},
 	"scourge":  {"name": "天灾军团", "color": "#e0645c", "dark": "#4a1c1c", "desc": "自冰封王座蔓延的亡灵与恶魔"},

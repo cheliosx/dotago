@@ -114,6 +114,29 @@ class WorldMap extends Control:
 				p = anim_from.lerp(anim_to, anim_t) + origin
 			draw_hero(p, h)
 
+		# 英雄站在物件格上时会盖住图标，补一个角落小徽章标明该格是什么
+		for o2 in Game.towns + Game.mines + Game.camps + Game.caches:
+			if not Game.is_visible(o2.pos):
+				continue
+			var hero_here := false
+			for hh in Game.heroes:
+				if hh.alive and hh.pos == o2.pos:
+					hero_here = true
+					break
+			if not hero_here:
+				continue
+			var bp := Hex.center(o2.pos, hex_size) + origin + Vector2(-hex_size * 0.62, -hex_size * 0.62)
+			var glyph := "·"
+			var bc := Color("#d8b45a")
+			match o2.kind:
+				"town": glyph = "城"; bc = Color(DB.FACTIONS[o2.owner].color)
+				"mine": glyph = DB.RES[o2.res].short; bc = Color(DB.RES[o2.res].color)
+				"camp": glyph = "怪"; bc = Color("#d0684c")
+				"cache": glyph = "宝"; bc = Color("#d8b45a")
+			draw_circle(bp, 9.0, Color("#0b0f18", 0.95))
+			draw_arc(bp, 9.0, 0, TAU, 24, bc, 1.8)
+			txt(bp + Vector2(0, 4), glyph, 10, bc)
+
 		# 悬停框 + 浮动名称（避免相邻格的长名称互相压叠）
 		if hover.x >= 0 and Game.tiles.has(Hex.key(hover)):
 			var pts := poly(hover, 1.5)
@@ -379,17 +402,22 @@ func on_map_click(c: Vector2i) -> void:
 	var h := Game.selected_hero()
 	if h.is_empty():
 		return
-	var o := Game.object_at(c)
-	# 切换己方英雄 / 进入己方城镇
-	if not o.is_empty() and o.kind == "hero" and not o.ref.is_ai:
-		Game.selected = o.ref.id
-		refresh()
-		return
+	# 排除当前英雄自己，否则站在城镇/矿场格上时点不到地面物件
+	var o := Game.object_at(c, int(h.id))
+	# 己方城镇优先（英雄可能正站在城镇格上）
 	if not o.is_empty() and o.kind == "town" and o.ref.owner == Game.faction:
 		if Hex.dist(c, h.pos) <= 1:
 			Game.goto("town", {"town_id": o.ref.id})
 		else:
 			Game.say("英雄需要走到城镇旁边才能进入")
+		return
+	# 切换另一名己方英雄
+	if not o.is_empty() and o.kind == "hero" and not o.ref.is_ai:
+		Game.selected = o.ref.id
+		refresh()
+		return
+	if c == h.pos and o.is_empty():
+		Game.goto("hero", {})
 		return
 	if not Game.is_explored(c):
 		Game.say("那片区域仍被迷雾笼罩")
@@ -397,8 +425,6 @@ func on_map_click(c: Vector2i) -> void:
 	if not map.reach.has(Hex.key(c)):
 		Game.say("本回合无法到达（移动力不足或被阻挡）")
 		return
-	if not o.is_empty() and o.kind == "cache":
-		pass
 	var old: Vector2i = h.pos
 	var ok := Game.move_hero(h, c)
 	if ok:

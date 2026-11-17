@@ -43,11 +43,41 @@ func _process(_delta) -> bool:
 			note("新游戏：第%d天 资源%s 英雄%s 部队%d支 地图%d格 迷雾%d格" % [G.day, str(G.res), h.name, h.army.size(), G.tiles.size(), G.explored.size()])
 			var reach = G.reachable(h)
 			note("可达格 = " + str(reach.size()))
+			# 3D 布局回归：格子中心 → 世界坐标 → 反查格子，必须一一对应
+			var bad := 0
+			var worst := 0.0
+			for key in G.tiles:
+				var c: Vector2i = G.tiles[key].c
+				var back: Vector2i = Hex3D.from_world(Hex3D.to_world(c, 1.0), 1.0)
+				if back != c:
+					bad += 1
+					worst = maxf(worst, Hex3D.to_world(c, 1.0).distance_to(Hex3D.to_world(back, 1.0)))
+			note("3D 拾取往返：错格 %d / %d，最大误差 %.4f" % [bad, G.tiles.size(), worst])
 			if reach.size() > 0:
 				var k = reach.keys()[0]
 				var c = Hex.from_key(k)
 				var ok = G.move_hero(h, c)
 				note("移动英雄到 (%d,%d) = %s 剩余移动力 %d" % [c.x, c.y, str(ok), h.mp])
+			# 回归：英雄抵达后站在该格上，交互必须仍能命中地面物件
+			var saved_pos = h.pos
+			var test_mine = G.mines[0]
+			test_mine.owner = ""
+			test_mine.guarded = false
+			test_mine.guards = []
+			h.pos = test_mine.pos
+			G.arrive(h, test_mine.pos)
+			note("抵达无守军矿场 → owner = " + str(test_mine.owner) + "（应为 sentinel）")
+			var cache = G.caches[0]
+			var gold_before = int(G.res.gold)
+			var cache_n_before = G.caches.size()
+			h.pos = cache.pos
+			G.arrive(h, cache.pos)
+			note("抵达宝箱 → 金币 %d→%d，宝箱数 %d→%d" % [gold_before, int(G.res.gold), cache_n_before, G.caches.size()])
+			var camp_probe = G.camps[0]
+			var g_kind = G.ground_at(camp_probe.pos).get("kind", "空")
+			var o_kind = G.object_at(camp_probe.pos, int(h.id)).get("kind", "空")
+			note("营地查找 → ground_at=%s / object_at(排除自己)=%s" % [g_kind, o_kind])
+			h.pos = saved_pos
 		3:
 			var tid = -1
 			for t in G.towns:

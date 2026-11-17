@@ -1,134 +1,17 @@
 class_name BattleView
-extends Control
+extends View3DCtrl
+## 三维战场（20×13 六边形战棋）。
+## 交互与大地图统一：
+##   左键点击 / 单指点按   → 查看：部队信息面板；点空白关闭
+##   右键点击 / 单指拖动   → 指令：移动、攻击、施法
+##   双指拖动 / 捏合 / 滚轮 → 平移与缩放
+## 规则（行动顺序、攻击反击、法术、AI、自动战斗、战后结算）与旧版完全一致。
 
-const BCOLS := 13
-const BROWS := 9
+const BCOLS := 20
+const BROWS := 13
+const ELEV := 0.30
 
-class BattleBoard extends Control:
-	const BCOLS := 13
-	const BROWS := 9
-	var view: Control = null
-	var hex_size := 30.0
-	var origin := Vector2.ZERO
-	var hover := Vector2i(-1, -1)
-
-	func txt(pos: Vector2, s: String, fs: int, col: Color, centered: bool = true) -> void:
-		var f := UI.font()
-		var w := f.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
-		draw_string(f, Vector2(pos.x - (w / 2.0 if centered else 0.0), pos.y), s, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, col)
-
-	func poly(c: Vector2i, shrink: float = 0.0) -> PackedVector2Array:
-		var p := Hex.polygon(c, hex_size, shrink)
-		var out := PackedVector2Array()
-		for v in p:
-			out.append(v + origin)
-		return out
-
-	func _draw() -> void:
-		if view == null or size.x < 10:
-			return
-		var dw := Hex.SQRT3 * (float(BCOLS) + 0.5) + 1.0
-		var dh := 1.5 * float(BROWS - 1) + 2.0
-		hex_size = clampf(minf((size.x - 18) / dw, (size.y - 18) / dh), 16.0, 48.0)
-		var bw := dw * hex_size
-		var bh := dh * hex_size
-		origin = Vector2((size.x - bw) / 2.0 + Hex.SQRT3 * hex_size / 2.0, (size.y - bh) / 2.0 + hex_size)
-
-		var biome: String = view.biome
-		var base_col := Color(DB.TERRAIN.get(biome, DB.TERRAIN.plain).color).darkened(0.28)
-		for y in range(BROWS):
-			for x in range(BCOLS):
-				var c := Vector2i(x, y)
-				var pts := poly(c, 1.0)
-				var col := base_col
-				if (x + y) % 2 == 0:
-					col = col.lightened(0.045)
-				# 双方部署区的阵营色调
-				if x <= 2:
-					col = col.lerp(Color("#1d4f68"), 0.42)
-				elif x >= BCOLS - 3:
-					col = col.lerp(Color("#692a2a"), 0.40)
-				elif x == 6:
-					col = col.lightened(0.05)
-				draw_colored_polygon(pts, col)
-				for i in range(6):
-					draw_line(pts[i], pts[(i + 1) % 6], Color("#0b0e14", 0.55), 1.0)
-		# 施法模式：全场淡紫提示
-		if view.mode == "spell":
-			for y in range(BROWS):
-				for x in range(BCOLS):
-					var c := Vector2i(x, y)
-					draw_colored_polygon(poly(c, 3.0), Color("#b48ae0", 0.10))
-		# 可达格
-		if view.mode != "spell":
-			for key in view.reach:
-				var c := Hex.from_key(key)
-				var pts := poly(c, 3.0)
-				draw_colored_polygon(pts, Color("#5fb8e8", 0.20))
-				for i in range(6):
-					draw_line(pts[i], pts[(i + 1) % 6], Color("#8fd6f5", 0.55), 1.3)
-		# 障碍物
-		for o in view.obstacles:
-			var p := Hex.center(o, hex_size) + origin
-			var rock := PackedVector2Array([p + Vector2(-15, 9), p + Vector2(-8, -9), p + Vector2(6, -12), p + Vector2(15, 5), p + Vector2(9, 11)])
-			draw_colored_polygon(rock, Color("#545866"))
-			draw_polyline(rock + PackedVector2Array([rock[0]]), Color("#868b99"), 1.5)
-		# 单位
-		for s in view.stacks:
-			if int(s.count) <= 0:
-				continue
-			draw_stack(s)
-		# 悬停
-		if hover.x >= 0:
-			var pts := poly(hover, 1.0)
-			for i in range(6):
-				draw_line(pts[i], pts[(i + 1) % 6], Color("#ffffff", 0.75), 2.0)
-
-	func draw_stack(s: Dictionary) -> void:
-		var u: Dictionary = DB.UNITS[s.unit]
-		var p := Hex.center(s.pos, hex_size) + origin
-		var col := Color(u.color)
-		var border := UI.C_BLUE if s.side == 0 else UI.C_RED
-		var r := hex_size * 0.62
-		if int(s.idx) == view.active:
-			draw_arc(p, r + 6, 0, TAU, 48, UI.C_GOLD, 3.0)
-		draw_circle(p + Vector2(0, 3), r + 2, Color(0, 0, 0, 0.45))
-		draw_circle(p, r, col.darkened(0.72))
-		draw_arc(p, r, 0, TAU, 42, border, 2.5)
-		txt(p + Vector2(0, 7), String(u.name).substr(0, 1), 20, col.lightened(0.45))
-		# 数量牌
-		var badge := Rect2(p.x - 19, p.y + r - 4, 38, 17)
-		draw_rect(badge, Color("#0c1019", 0.95), true)
-		draw_rect(badge, border, false, 1.2)
-		txt(p + Vector2(0, r + 9), "×" + str(s.count), 12, Color.WHITE)
-		# 生命条（顶部单位剩余血量）
-		var frac := clampf(float(s.top_hp) / float(maxf(1, int(u.hp))), 0.0, 1.0)
-		var bw := r * 1.7
-		draw_rect(Rect2(p.x - bw / 2.0, p.y - r - 9, bw, 4), Color("#11151d"))
-		draw_rect(Rect2(p.x - bw / 2.0, p.y - r - 9, bw * frac, 4), UI.C_GREEN if s.side == 0 else UI.C_RED)
-		if int(s.buff_def) > 0:
-			txt(p + Vector2(0, -r - 13), "霜甲", 10, UI.C_BLUE)
-		if s.defending:
-			txt(p + Vector2(0, -r - 13), "防御", 10, UI.C_GOLD)
-
-	func _gui_input(event: InputEvent) -> void:
-		if event is InputEventMouseMotion:
-			var c := pick(event.position)
-			if c != hover:
-				hover = c
-				queue_redraw()
-		elif event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-			var c := pick(event.position)
-			if c.x >= 0 and view.has_method("on_board_click"):
-				view.call("on_board_click", c)
-
-	func pick(p: Vector2) -> Vector2i:
-		var cells := []
-		for y in range(BROWS):
-			for x in range(BCOLS):
-				cells.append(Vector2i(x, y))
-		return Hex.nearest(p - origin, hex_size, cells)
-
+# ---------------------------------------------------------------- 规则状态
 var b: Dictionary = {}
 var h: Dictionary = {}
 var foe: Dictionary = {}
@@ -150,19 +33,34 @@ var log_lines := []
 var mana := 0
 var rng := RandomNumberGenerator.new()
 
-var header: HBoxContainer
-var body: HBoxContainer
-var actions: HBoxContainer
-var side: VBoxContainer
-var hint: Label
-var board: BattleBoard
+# ---------------------------------------------------------------- 三维节点
+var terrain_mi: MeshInstance3D
+var overlay_mi: MeshInstance3D
+var piece_root: Node3D
+var blocker_root: Node3D
+var unit_nodes := {}    # idx -> Node3D
+var unit_labels := {}   # idx -> Label3D
+var unit_rings := {}    # idx -> Node3D
+var unit_bars := {}     # idx -> Node3D（血条容器）
+var unit_targets := {}  # idx -> Vector3
 
-func setup(p: Dictionary) -> void:
+# ---------------------------------------------------------------- UI
+var topbar: PanelContainer
+var side: PanelContainer
+var actions: PanelContainer
+var hud_row: HBoxContainer
+var side_box: VBoxContainer
+var action_row: HBoxContainer
+var hover_cell := Vector2i(-1, -1)
+var cmd_cell := Vector2i(-1, -1)
+var inspect_idx := -1
+
+func setup(_p: Dictionary) -> void:
 	pass
 
 func _ready() -> void:
+	mouse_filter = Control.MOUSE_FILTER_STOP
 	rng.randomize()
-	# 浅拷贝：保留 ref 对真实矿场 / 城镇 / 英雄的引用，战后才能正确结算归属
 	b = Game.pending_battle.duplicate(false)
 	if b.is_empty():
 		Game.goto("world", {})
@@ -171,51 +69,221 @@ func _ready() -> void:
 	foe = b.enemy_hero
 	biome = String(b.get("biome", "plain"))
 	mana = int(h.mana)
-	build_ui()
+
+	build_viewport()
+	# 右侧留给行动顺序面板：三维视口只占左侧，避免单位和面板互相遮挡
+	svc.offset_right = -312
+	_build_scene()
+	_build_ui()
+	build_sheet()
+	map_bounds = Hex3D.bounds(BCOLS, BROWS, HEX_S)
+	bounds_margin = 2.0
+	pitch = deg_to_rad(66.0)
+	dist = 38.0
+	dist_target = 38.0
+	center_on(Hex3D.to_world(Vector2i(BCOLS / 2, BROWS / 2), HEX_S), false)
+
 	setup_stacks()
+	build_board()
+	build_overlay()
+	sync_units()
 	start_round()
 
-func build_ui() -> void:
-	var margin := MarginContainer.new()
-	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	for k in ["margin_left", "margin_right", "margin_top", "margin_bottom"]:
-		margin.add_theme_constant_override(k, 14)
-	add_child(margin)
-	var v := UI.vbox(8)
-	margin.add_child(v)
-	header = UI.hbox(10)
-	header.custom_minimum_size = Vector2(0, 50)
-	v.add_child(header)
-	body = UI.hbox(10)
-	body.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	v.add_child(body)
-	var frame := UI.panel(Color("#0e121b"), UI.C_BORDER, 8)
-	frame.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	frame.size_flags_stretch_ratio = 3.0
-	body.add_child(frame)
-	board = BattleBoard.new()
-	board.view = self
-	board.mouse_filter = Control.MOUSE_FILTER_STOP
-	board.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	board.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	frame.add_child(board)
-	var sf := UI.panel(Color("#171d2b"), UI.C_BORDER, 8)
-	sf.custom_minimum_size = Vector2(268, 0)
-	body.add_child(sf)
-	var sc := UI.scroll(UI.vbox(9))
-	sf.add_child(sc)
-	side = sc.get_child(0)
-	actions = UI.hbox(8)
-	actions.custom_minimum_size = Vector2(0, 50)
-	v.add_child(actions)
-	hint = UI.label("战斗开始", 14, UI.C_GOLD)
-	hint.custom_minimum_size = Vector2(0, 24)
-	v.add_child(hint)
+# ==================================================================== 场景搭建
+func _build_scene() -> void:
+	terrain_mi = MeshInstance3D.new()
+	terrain_mi.material_override = terrain_material()
+	world.add_child(terrain_mi)
+	overlay_mi = MeshInstance3D.new()
+	overlay_mi.material_override = overlay_material()
+	world.add_child(overlay_mi)
+	blocker_root = Node3D.new()
+	world.add_child(blocker_root)
+	piece_root = Node3D.new()
+	world.add_child(piece_root)
 
+func _cell_pos(c: Vector2i) -> Vector3:
+	return Hex3D.to_world(c, HEX_S) + Vector3(0, ELEV, 0)
+
+func _zone_color(c: Vector2i) -> Color:
+	var base := Color(DB.TERRAIN.get(biome, DB.TERRAIN.plain).color).darkened(0.34)
+	if (c.x + c.y) % 2 == 0:
+		base = base.lightened(0.045)
+	if c.x <= 4:
+		base = base.lerp(Color("#1d4f68"), 0.40)
+	elif c.x >= BCOLS - 5:
+		base = base.lerp(Color("#692a2a"), 0.38)
+	elif absi(c.x - BCOLS / 2) <= 1:
+		base = base.lightened(0.05)
+	return base
+
+func build_board() -> void:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for y in range(BROWS):
+		for x in range(BCOLS):
+			var c := Vector2i(x, y)
+			var top := _zone_color(c)
+			Hex3D.add_prism(st, c, HEX_S, 0.965, -0.5, ELEV, top, top.darkened(0.5))
+	terrain_mi.mesh = st.commit()
+
+	# 障碍物：几块岩石
+	for c in obstacles:
+		var node := Node3D.new()
+		node.position = _cell_pos(c)
+		add_cyl(node, Vector3(0, 0.04, 0), 0.44, 0.08, Color("#2b303c"), 6)
+		add_cone(node, Vector3(-0.10, 0.30, 0.06), 0.36, 0.56, Color("#4a4f5c"), 5)
+		add_cone(node, Vector3(0.18, 0.20, -0.12), 0.26, 0.38, Color("#5d6373"), 5)
+		blocker_root.add_child(node)
+
+func build_overlay() -> void:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	# 可移动格
+	for key in reach:
+		var c := Hex.from_key(key)
+		Hex3D.add_face(st, c, HEX_S, 0.88, ELEV + 0.03, Color(1.0, 0.90, 0.42, 0.34))
+	if reach.size() > 0:
+		add_region_edges(st, reach, HEX_S, func(_c: Vector2i) -> float: return ELEV + 0.034,
+			Color(1.0, 0.92, 0.50, 1.0), 0.11)
+	# 敌方单位：红环提示可攻击目标
+	for s in stacks:
+		if int(s.count) <= 0 or int(s.side) == 0:
+			continue
+		Hex3D.add_outline(st, s.pos, HEX_S, 0.90, ELEV + 0.035, Color(0.88, 0.36, 0.32, 0.95), 0.09)
+	# 施法模式：全盘淡紫
+	if mode == "spell":
+		for y in range(BROWS):
+			for x in range(BCOLS):
+				Hex3D.add_face(st, Vector2i(x, y), HEX_S, 0.86, ELEV + 0.045, Color(0.70, 0.54, 0.88, 0.10))
+	# 指令目标 / 悬停
+	if cmd_cell.x >= 0:
+		Hex3D.add_outline(st, cmd_cell, HEX_S, 0.93, ELEV + 0.05, Color(1.0, 0.55, 0.25, 0.95), 0.10)
+	if hover_cell.x >= 0:
+		Hex3D.add_outline(st, hover_cell, HEX_S, 0.94, ELEV + 0.055, Color(1, 1, 1, 0.85), 0.09)
+	overlay_mi.mesh = st.commit()
+
+# ==================================================================== 单位棋子
+func _make_unit(s: Dictionary) -> Node3D:
+	var idx := int(s.idx)
+	var u: Dictionary = DB.UNITS[s.unit]
+	var col := Color(u.color)
+	var fac := UI.C_BLUE if int(s.side) == 0 else UI.C_RED
+	var node := Node3D.new()
+	node.position = _cell_pos(s.pos)
+	node.scale = Vector3(1.5, 1.5, 1.5)
+	add_cyl(node, Vector3(0, 0.05, 0), 0.40, 0.10, fac.darkened(0.45), 12)
+	# 躯干：远程兵细高、重甲兵方块、其余矮方块
+	var body: MeshInstance3D
+	if int(u.range) > 2:
+		body = add_cyl(node, Vector3(0, 0.42, 0), 0.14, 0.72, col.darkened(0.25), 8, 0.06)
+	else:
+		var sz := Vector3(0.34, 0.56, 0.34) if int(u.tier) >= 4 else Vector3(0.30, 0.44, 0.30)
+		body = add_box(node, Vector3(0, 0.05 + sz.y * 0.5, 0), sz, col.darkened(0.3))
+	var head := MeshInstance3D.new()
+	var sp := SphereMesh.new()
+	sp.radius = 0.11
+	sp.height = 0.22
+	head.mesh = sp
+	head.material_override = mat(col.lightened(0.25))
+	head.position = Vector3(0, 0.82, 0)
+	node.add_child(head)
+	# 血条（容器 + 底色 + 填充，填充用 X 缩放表示比例）
+	var bar := Node3D.new()
+	bar.position = Vector3(0, 1.02, 0)
+	var bg := add_box(bar, Vector3.ZERO, Vector3(0.62, 0.06, 0.02), Color("#11151d"))
+	bg.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var fill := add_box(bar, Vector3.ZERO, Vector3(0.62, 0.05, 0.03), UI.C_GREEN if int(s.side) == 0 else UI.C_RED)
+	fill.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	node.add_child(bar)
+	unit_bars[idx] = bar
+	# 行动中光环
+	var ring := Node3D.new()
+	var torus := TorusMesh.new()
+	torus.inner_radius = 0.42
+	torus.outer_radius = 0.54
+	torus.rings = 24
+	torus.ring_segments = 8
+	var mi := MeshInstance3D.new()
+	mi.mesh = torus
+	mi.material_override = mat(Color("#d8b45a"), true)
+	mi.rotation.x = deg_to_rad(90)
+	mi.position = Vector3(0, 0.12, 0)
+	ring.add_child(mi)
+	ring.visible = false
+	node.add_child(ring)
+	unit_rings[idx] = ring
+	unit_labels[idx] = add_label(node, "%s ×%d" % [u.name, int(s.count)], Vector3(0, 1.26, 0), col.lightened(0.15), 40)
+	piece_root.add_child(node)
+	return node
+
+func sync_units() -> void:
+	for s in stacks:
+		var idx := int(s.idx)
+		if int(s.count) <= 0:
+			if unit_nodes.has(idx):
+				unit_nodes[idx].visible = false
+			continue
+		if not unit_nodes.has(idx):
+			unit_nodes[idx] = _make_unit(s)
+			unit_targets[idx] = _cell_pos(s.pos)
+		var node: Node3D = unit_nodes[idx]
+		node.visible = true
+		unit_targets[idx] = _cell_pos(s.pos)
+		if node.position.distance_to(_cell_pos(s.pos)) > 3.0:
+			node.position = _cell_pos(s.pos)
+		var u: Dictionary = DB.UNITS[s.unit]
+		var l: Label3D = unit_labels[idx]
+		l.text = "%s ×%d" % [u.name, int(s.count)]
+		l.modulate = Color(u.color).lightened(0.15)
+		var bar: Node3D = unit_bars[idx]
+		var frac := clampf(float(s.top_hp) / float(maxf(1, int(u.hp))), 0.0, 1.0)
+		var fill: MeshInstance3D = bar.get_child(1)
+		fill.scale.x = maxf(0.02, frac)
+		fill.position.x = -0.31 * (1.0 - frac)
+		var ring: Node3D = unit_rings[idx]
+		ring.visible = idx == active
+
+func update_units_states() -> void:
+	# 状态徽标（防御 / 等待 / 霜甲）
+	for s in stacks:
+		var idx := int(s.idx)
+		if int(s.count) <= 0 or not unit_nodes.has(idx):
+			continue
+		var tag := ""
+		if s.defending:
+			tag = "防"
+		elif int(s.buff_def) > 0:
+			tag = "霜"
+		elif s.waited:
+			tag = "待"
+		var node: Node3D = unit_nodes[idx]
+		var badge = node.get_node_or_null("Badge")
+		if tag == "":
+			if badge != null:
+				badge.queue_free()
+			continue
+		if badge == null:
+			var l := add_label(node, tag, Vector3(0.34, 1.24, 0), UI.C_GOLD, 30)
+			l.name = "Badge"
+		else:
+			badge.text = tag
+
+func _process(delta: float) -> void:
+	super(delta)
+	for idx in unit_targets.keys():
+		var node: Node3D = unit_nodes.get(idx, null)
+		if node == null:
+			continue
+		var target: Vector3 = unit_targets[idx]
+		if node.position.distance_to(target) > 0.02:
+			node.position = node.position.lerp(target, minf(1.0, delta * 9.0))
+
+# ==================================================================== 规则（与原版一致）
 func setup_stacks() -> void:
-	var p_slots := [Vector2i(2, 1), Vector2i(2, 3), Vector2i(2, 5), Vector2i(2, 7), Vector2i(0, 2), Vector2i(0, 4), Vector2i(0, 6)]
-	var e_slots := [Vector2i(10, 1), Vector2i(10, 3), Vector2i(10, 5), Vector2i(10, 7), Vector2i(12, 2), Vector2i(12, 4), Vector2i(12, 6)]
-	obstacles = [Vector2i(6, 0), Vector2i(6, 8), Vector2i(5, 4), Vector2i(7, 4)]
+	var p_slots := [Vector2i(3, 1), Vector2i(3, 3), Vector2i(3, 5), Vector2i(3, 7), Vector2i(3, 9), Vector2i(1, 2), Vector2i(1, 4)]
+	var e_slots := [Vector2i(16, 1), Vector2i(16, 3), Vector2i(16, 5), Vector2i(16, 7), Vector2i(16, 9), Vector2i(18, 2), Vector2i(18, 4)]
+	obstacles = [Vector2i(10, 0), Vector2i(10, 12), Vector2i(9, 4), Vector2i(11, 4), Vector2i(9, 8), Vector2i(11, 8), Vector2i(10, 6)]
 	var idx := 0
 	var pi := 0
 	var ei := 0
@@ -299,9 +367,8 @@ func next_turn() -> void:
 		ai_act(active)
 	else:
 		busy = false
-		hint.text = "轮到 %s（速度 %d）· 点击蓝色格移动，点击敌军攻击" % [DB.UNITS[stacks[active].unit].name, eff_speed(stacks[active])]
-	refresh_ui()
-	board.queue_redraw()
+		hint.text = "轮到 %s（速度 %d）· 右键 / 按住拖动 移动或攻击" % [DB.UNITS[stacks[active].unit].name, eff_speed(stacks[active])]
+	refresh_view()
 
 func recompute_reach() -> void:
 	reach = {}
@@ -310,7 +377,7 @@ func recompute_reach() -> void:
 	var s: Dictionary = stacks[active]
 	var u: Dictionary = DB.UNITS[s.unit]
 	var me: Node = self
-	var cost_fn := func(c: Vector2i) -> int: return 1
+	var cost_fn := func(_c: Vector2i) -> int: return 1
 	var pass_fn := func(c: Vector2i) -> bool: return me.cell_free(c)
 	var f := Hex.flood(s.pos, int(u.move), cost_fn, pass_fn)
 	f.erase(Hex.key(s.pos))
@@ -350,9 +417,12 @@ func check_end() -> bool:
 		return true
 	return false
 
-# ------------------------------------------------------------- 玩家输入
-func on_board_click(c: Vector2i) -> void:
-	if finished or busy or active < 0 or stacks[active].side != 0:
+# ==================================================================== 指令
+func command_at(c: Vector2i) -> void:
+	if finished or busy or active < 0:
+		hint.text = "等待敌方行动……"
+		return
+	if int(stacks[active].side) != 0:
 		return
 	if mode == "spell":
 		cast_spell(c)
@@ -408,8 +478,6 @@ func best_approach(s: Dictionary, target: Vector2i) -> Vector2i:
 		if d < best_d and (c == s.pos or cell_free(c)):
 			best_d = d
 			best = c
-	if best_d <= 1:
-		return best
 	return best
 
 func end_action() -> void:
@@ -423,14 +491,14 @@ func end_action() -> void:
 	next_turn()
 
 func action_defend() -> void:
-	if finished or busy or active < 0 or stacks[active].side != 0:
+	if finished or busy or active < 0 or int(stacks[active].side) != 0:
 		return
 	stacks[active].defending = true
 	add_log("%s 进入防御姿态。" % DB.UNITS[stacks[active].unit].name)
 	end_action()
 
 func action_wait() -> void:
-	if finished or busy or active < 0 or stacks[active].side != 0:
+	if finished or busy or active < 0 or int(stacks[active].side) != 0:
 		return
 	var s: Dictionary = stacks[active]
 	if s.waited:
@@ -443,7 +511,7 @@ func action_wait() -> void:
 	next_turn()
 
 func select_spell(sid: String) -> void:
-	if finished or busy or active < 0 or stacks[active].side != 0:
+	if finished or busy or active < 0 or int(stacks[active].side) != 0:
 		hint.text = "请等待我方部队行动"
 		return
 	if hero_cast:
@@ -455,20 +523,18 @@ func select_spell(sid: String) -> void:
 	spell_id = sid
 	mode = "spell"
 	reach = {}
-	add_log("选择法术「%s」，点击目标格施放。" % DB.SPELLS[sid].name)
+	add_log("选择法术「%s」，右键（或按住拖动）选择目标。" % DB.SPELLS[sid].name)
 	if DB.SPELLS[sid].type == "drain_all":
 		cast_spell(Vector2i(-1, -1))
 		return
-	hint.text = "施法模式：点击目标（友军法术请点我方单位）"
-	refresh_ui()
-	board.queue_redraw()
+	hint.text = "施法模式：右键 / 按住拖动 选择目标（友军法术点我方单位）"
+	refresh_view()
 
 func cancel_spell() -> void:
 	mode = "normal"
 	spell_id = ""
 	recompute_reach()
-	refresh_ui()
-	board.queue_redraw()
+	refresh_view()
 
 func cast_spell(c: Vector2i) -> void:
 	var sd: Dictionary = DB.SPELLS[spell_id]
@@ -498,14 +564,14 @@ func cast_spell(c: Vector2i) -> void:
 	elif typ == "single":
 		var t := stack_at(c)
 		if t < 0 or stacks[t].side != 1:
-			hint.text = "请点击一支敌军"
+			hint.text = "请选择一支敌军"
 			return
 		apply_damage(stacks[t], power)
 		hit = 1
 	elif typ == "heal":
 		var t2 := stack_at(c)
 		if t2 < 0 or stacks[t2].side != 0:
-			hint.text = "请点击一支友军"
+			hint.text = "请选择一支友军"
 			return
 		var u: Dictionary = DB.UNITS[stacks[t2].unit]
 		var pool := DB.unit_hp_pool(int(stacks[t2].count), int(stacks[t2].top_hp), stacks[t2].unit) + int(power) * int(u.hp) / 10
@@ -516,7 +582,7 @@ func cast_spell(c: Vector2i) -> void:
 	elif typ == "buff_def":
 		var t3 := stack_at(c)
 		if t3 < 0 or stacks[t3].side != 0:
-			hint.text = "请点击一支友军"
+			hint.text = "请选择一支友军"
 			return
 		stacks[t3].buff_def = int(stacks[t3].buff_def) + int(sd.power)
 		hit = 1
@@ -532,10 +598,9 @@ func cast_spell(c: Vector2i) -> void:
 	if check_end():
 		return
 	recompute_reach()
-	refresh_ui()
-	board.queue_redraw()
+	refresh_view()
 
-# ------------------------------------------------------------- 伤害与攻击
+# ==================================================================== 伤害
 func attack(a_idx: int, t_idx: int, ranged: bool) -> void:
 	var a: Dictionary = stacks[a_idx]
 	var t: Dictionary = stacks[t_idx]
@@ -599,7 +664,7 @@ func foe_hero_spell() -> void:
 	apply_damage(stacks[target], dmg)
 	add_log("%s 施放了奥术弹，突袭我军！" % foe.name)
 
-# ------------------------------------------------------------- AI
+# ==================================================================== AI
 func ai_act(idx: int) -> void:
 	await get_tree().create_timer(0.28).timeout
 	if finished:
@@ -619,7 +684,7 @@ func ai_act(idx: int) -> void:
 	if int(u.range) > 1 and d >= 2 and d <= int(u.range) and not has_adjacent_enemy(s):
 		attack(idx, target, true)
 	else:
-		var one := func(c: Vector2i) -> int: return 1
+		var one := func(_c: Vector2i) -> int: return 1
 		var free_fn := func(c: Vector2i) -> bool: return cell_free(c)
 		var f := Hex.flood(s.pos, int(u.move), one, free_fn)
 		var best_cell: Vector2i = s.pos
@@ -653,7 +718,7 @@ func auto_battle() -> void:
 		return
 	add_log("指挥官下令全军自动作战……")
 	var guard := 0
-	while not finished and guard < 200:
+	while not finished and guard < 300:
 		guard += 1
 		for s in stacks:
 			if int(s.count) <= 0 or s.side != 0:
@@ -674,9 +739,9 @@ func auto_battle() -> void:
 	busy = false
 	if not finished:
 		finish(alive_count(0) > alive_count(1))
-	board.queue_redraw()
+	refresh_view()
 
-# ------------------------------------------------------------- 结束
+# ==================================================================== 结束
 func finish(win: bool) -> void:
 	if finished:
 		return
@@ -729,47 +794,86 @@ func add_log(s: String) -> void:
 	if log_lines.size() > 30:
 		log_lines.resize(30)
 
-# ------------------------------------------------------------- 界面刷新
-func refresh_ui() -> void:
-	if not is_instance_valid(header):
-		return
-	for c in header.get_children():
-		header.remove_child(c)
-		c.queue_free()
-	for c in actions.get_children():
-		actions.remove_child(c)
-		c.queue_free()
-	for c in side.get_children():
-		side.remove_child(c)
-		c.queue_free()
+# ==================================================================== UI
+func _build_ui() -> void:
+	topbar = UI.panel(Color("#141a26"), UI.C_GOLD_DIM, 8)
+	topbar.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
+	topbar.offset_left = 12
+	topbar.offset_right = -12
+	topbar.offset_top = 10
+	topbar.offset_bottom = 74
+	topbar.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(topbar)
+	hud_row = UI.hbox(8)
+	topbar.add_child(hud_row)
 
-	header.add_child(UI.label("◆ %s  Lv.%d" % [h.name, h.level], 19, UI.C_BLUE))
-	header.add_child(UI.label("魔法 %d / %d" % [mana, Game.max_mana(h)], 15, UI.C_PURPLE))
-	header.add_child(UI.bar(float(mana), float(Game.max_mana(h)), UI.C_PURPLE, 130, 10))
-	header.add_child(UI.label("VS", 17, UI.C_GOLD))
-	header.add_child(UI.label("▲ %s" % String(foe.name), 18, UI.C_RED))
+	side = UI.panel(Color("#141a26"), UI.C_BORDER, 8)
+	side.anchor_left = 1.0
+	side.anchor_right = 1.0
+	side.anchor_top = 0.0
+	side.anchor_bottom = 1.0
+	side.offset_left = -300
+	side.offset_right = -12
+	side.offset_top = 82
+	side.offset_bottom = -86
+	side.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(side)
+	var sc := ScrollContainer.new()
+	sc.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	side.add_child(sc)
+	side_box = UI.vbox(7)
+	side_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sc.add_child(side_box)
+
+	actions = UI.panel(Color("#141a26"), UI.C_GOLD_DIM, 8)
+	actions.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_WIDE)
+	actions.offset_left = 12
+	actions.offset_right = -12
+	actions.offset_top = -74
+	actions.offset_bottom = -12
+	actions.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(actions)
+	action_row = UI.hbox(8)
+	actions.add_child(action_row)
+
+	hint = UI.label("战斗开始 · 点击查看 · 右键 / 按住拖动 移动攻击", 13, UI.C_GOLD)
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	hint.position = Vector2(18, 80)
+	add_child(hint)
+
+func refresh_view() -> void:
+	if not is_instance_valid(topbar):
+		return
+	build_overlay()
+	sync_units()
+	update_units_states()
+	_build_hud()
+	_build_side()
+	_build_actions()
+	if sheet_shown:
+		fill_sheet()
+		_layout_sheet(false)
+
+func _build_hud() -> void:
+	for c in hud_row.get_children():
+		hud_row.remove_child(c)
+		c.queue_free()
+	hud_row.add_child(UI.label("◆ %s  Lv.%d" % [h.name, h.level], 18, UI.C_BLUE))
+	hud_row.add_child(UI.label("魔法 %d/%d" % [mana, Game.max_mana(h)], 14, UI.C_PURPLE))
+	hud_row.add_child(UI.bar(float(mana), float(Game.max_mana(h)), UI.C_PURPLE, 120, 10))
+	hud_row.add_child(UI.label("VS", 16, UI.C_GOLD))
+	hud_row.add_child(UI.label("▲ %s" % String(foe.name), 17, UI.C_RED))
 	var sp := Control.new()
 	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	header.add_child(sp)
-	header.add_child(UI.label("第 %d 回合" % round_no, 17, UI.C_GOLD))
-	header.add_child(UI.label("我方 %d / 敌方 %d" % [alive_count(0), alive_count(1)], 14, UI.C_MUTED))
+	hud_row.add_child(sp)
+	hud_row.add_child(UI.label("第 %d 回合" % round_no, 16, UI.C_GOLD))
+	hud_row.add_child(UI.label("我方 %d / 敌方 %d" % [alive_count(0), alive_count(1)], 14, UI.C_MUTED))
 
-	var can_act: bool = not finished and not busy and active >= 0 and int(stacks[active].side) == 0
-	actions.add_child(UI.button("防御", func(): action_defend(), 15, Vector2(100, 42), UI.C_MUTED))
-	actions.add_child(UI.button("等待", func(): action_wait(), 15, Vector2(100, 42), UI.C_MUTED))
-	actions.add_child(UI.button("自动战斗", func(): auto_battle(), 15, Vector2(130, 42), UI.C_GREEN))
-	actions.add_child(UI.button("撤退", func(): finish(false), 14, Vector2(90, 42), UI.C_RED))
-	var sp2 := Control.new()
-	sp2.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	actions.add_child(sp2)
-	var tip := UI.label("远程贴身减半 · 每回合可施法一次", 13, UI.C_MUTED)
-	tip.autowrap_mode = TextServer.AUTOWRAP_OFF
-	actions.add_child(tip)
-	for a in actions.get_children():
-		if a is Button:
-			a.disabled = not can_act
-
-	side.add_child(UI.title("行动顺序", 18))
+func _build_side() -> void:
+	for c in side_box.get_children():
+		side_box.remove_child(c)
+		c.queue_free()
+	side_box.add_child(UI.title("行动顺序", 17))
 	for i in order:
 		var s: Dictionary = stacks[i]
 		if int(s.count) <= 0:
@@ -783,30 +887,167 @@ func refresh_ui() -> void:
 		l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		row.add_child(l)
 		row.add_child(UI.label("速%d" % eff_speed(s), 11, UI.C_MUTED))
-		side.add_child(row)
-	side.add_child(UI.line(UI.C_GOLD_DIM))
-	side.add_child(UI.title("英雄法术", 18))
-	side.add_child(UI.label("本回合%s" % ("已施法" if hero_cast else "可施法 1 次"), 12, UI.C_MUTED))
+		side_box.add_child(row)
+	side_box.add_child(UI.line(UI.C_GOLD_DIM))
+	side_box.add_child(UI.title("英雄法术", 17))
+	side_box.add_child(nowrap("本回合%s" % ("已施法" if hero_cast else "可施法 1 次"), 12, UI.C_MUTED))
+	var can_act: bool = not finished and not busy and active >= 0 and int(stacks[active].side) == 0
 	for sid in h.spells:
 		var sd: Dictionary = DB.SPELLS[sid]
-		var btn := UI.button("%s  %d魔" % [sd.name, int(sd.cost)], Callable(self, "select_spell").bind(sid), 13, Vector2(0, 36), UI.C_PURPLE)
+		var btn := UI.button("%s  %d魔" % [sd.name, int(sd.cost)], Callable(self, "select_spell").bind(sid), 13, Vector2(0, 34), UI.C_PURPLE)
 		btn.disabled = hero_cast or int(sd.cost) > mana or not can_act or finished
 		if spell_id == sid:
 			btn.text = "◆ " + String(sd.name)
-		side.add_child(btn)
-		if spell_id == sid:
-			var d := UI.label(String(sd.desc), 11, UI.C_MUTED)
-			d.custom_minimum_size = Vector2(230, 0)
-			side.add_child(d)
+		side_box.add_child(btn)
 	if mode == "spell":
-		side.add_child(UI.button("取消施法", func(): cancel_spell(), 13, Vector2(0, 34), UI.C_RED))
-	side.add_child(UI.line(UI.C_GOLD_DIM))
-	side.add_child(UI.title("战斗记录", 17))
+		side_box.add_child(UI.button("取消施法", cancel_spell, 13, Vector2(0, 32), UI.C_RED))
+	side_box.add_child(UI.line(UI.C_GOLD_DIM))
+	side_box.add_child(UI.title("战斗记录", 16))
 	var n := 0
 	for l2 in log_lines:
-		if n >= 9:
+		if n >= 8:
 			break
 		var jl := UI.label("· " + String(l2), 11, UI.C_MUTED)
-		jl.custom_minimum_size = Vector2(230, 0)
-		side.add_child(jl)
+		jl.custom_minimum_size = Vector2(246, 0)
+		jl.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		side_box.add_child(jl)
 		n += 1
+
+func _build_actions() -> void:
+	for c in action_row.get_children():
+		action_row.remove_child(c)
+		c.queue_free()
+	var can_act: bool = not finished and not busy and active >= 0 and int(stacks[active].side) == 0
+	var bd := UI.button("防御", action_defend, 15, Vector2(96, 40), UI.C_MUTED)
+	bd.disabled = not can_act
+	action_row.add_child(bd)
+	var bw := UI.button("等待", action_wait, 15, Vector2(96, 40), UI.C_MUTED)
+	bw.disabled = not can_act
+	action_row.add_child(bw)
+	var ba := UI.button("自动战斗", auto_battle, 15, Vector2(126, 40), UI.C_GREEN)
+	ba.disabled = finished
+	action_row.add_child(ba)
+	var br := UI.button("撤退", func(): finish(false), 14, Vector2(88, 40), UI.C_RED)
+	br.disabled = finished
+	action_row.add_child(br)
+	var sp := Control.new()
+	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	action_row.add_child(sp)
+	action_row.add_child(nowrap("点击查看 · 右键移动/攻击 · 双指平移缩放 · 远程贴身减半", 12, UI.C_MUTED))
+
+# ==================================================================== 查看面板
+func fill_sheet() -> void:
+	for c in sheet.get_children():
+		sheet.remove_child(c)
+		c.queue_free()
+	if inspect_idx < 0 or inspect_idx >= stacks.size():
+		sheet_shown = false
+		return
+	var s: Dictionary = stacks[inspect_idx]
+	if int(s.count) <= 0:
+		sheet_shown = false
+		return
+	var u: Dictionary = DB.UNITS[s.unit]
+	var margin := MarginContainer.new()
+	margin.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	margin.add_theme_constant_override("margin_left", 16)
+	margin.add_theme_constant_override("margin_right", 16)
+	margin.add_theme_constant_override("margin_top", 12)
+	margin.add_theme_constant_override("margin_bottom", 12)
+	sheet.add_child(margin)
+
+	var row := UI.hbox(18)
+	margin.add_child(row)
+	var left := UI.vbox(6)
+	left.custom_minimum_size = Vector2(360, 0)
+	row.add_child(left)
+	var nr := UI.hbox(8)
+	left.add_child(nr)
+	nr.add_child(UI.title(String(u.name), 24))
+	nr.add_child(UI.chip("我方" if int(s.side) == 0 else "敌方", UI.C_BLUE if int(s.side) == 0 else UI.C_RED))
+	left.add_child(UI.label("%s · %d 级兵种 · 坐标 (%d, %d)" % [
+		"远程" if int(u.range) > 2 else ("飞行" if String(u.trait) == "飞行" else "近战"),
+		int(u.tier), s.pos.x, s.pos.y], 13, UI.C_MUTED))
+	left.add_child(UI.label("数量 ×%d    单体生命 %d / %d" % [int(s.count), int(s.top_hp), int(u.hp)], 14, UI.C_TEXT))
+	left.add_child(UI.bar(float(s.top_hp), float(u.hp), UI.C_GREEN if int(s.side) == 0 else UI.C_RED, 300, 10))
+	left.add_child(nowrap("攻 %d  防 %d  速 %d  射程 %d" % [int(u.atk), int(u.def), eff_speed(s), int(u.range)], 14, UI.C_TEXT))
+
+	var mid := UI.vbox(6)
+	mid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(mid)
+	mid.add_child(UI.label("状 态", 13, UI.C_MUTED))
+	var tags := []
+	if s.defending:
+		tags.append("防御姿态（受伤 -25%）")
+	if int(s.buff_def) > 0:
+		tags.append("霜甲 +%d" % int(s.buff_def))
+	if s.waited:
+		tags.append("本回合已等待")
+	if bool(s.acted):
+		tags.append("本回合已行动")
+	if int(s.idx) == active:
+		tags.append("正在行动")
+	if tags.is_empty():
+		tags.append("无")
+	mid.add_child(nowrap(" · ".join(tags), 13, UI.C_GOLD))
+	var dmg := float(int(s.count)) * float(int(u.atk))
+	mid.add_child(nowrap("估算输出 约 %d 点/次（不含英雄与克制修正）" % int(dmg), 12, UI.C_MUTED))
+	if not is_equal_approx(float(u.hp), 0.0):
+		var total := DB.unit_hp_pool(int(s.count), int(s.top_hp), s.unit)
+		mid.add_child(nowrap("总生命池 %d" % total, 12, UI.C_MUTED))
+	if int(s.side) == 1 and int(s.count) > 0:
+		mid.add_child(nowrap("右键 / 按住拖动 该部队即可发起攻击", 12, UI.C_RED))
+
+	var right := UI.vbox(8)
+	right.custom_minimum_size = Vector2(180, 0)
+	row.add_child(right)
+	if int(s.idx) == active and not finished:
+		right.add_child(UI.button("原地防御", action_defend, 14, Vector2(170, 38)))
+		right.add_child(UI.button("等待", action_wait, 14, Vector2(170, 38)))
+	right.add_child(UI.ghost_button("关闭", hide_sheet, 14))
+
+# ==================================================================== 查看 / 指令入口
+func cell_at_screen(p: Vector2) -> Vector2i:
+	var hit := ground_hit(p, ELEV + 0.05)
+	var cell := Hex3D.from_world(hit, HEX_S)
+	if cell.x < 0 or cell.y < 0 or cell.x >= BCOLS or cell.y >= BROWS:
+		return Vector2i(-1, -1)
+	return cell
+
+func on_tap(pos: Vector2) -> void:
+	var c := cell_at_screen(pos)
+	if c.x < 0:
+		hide_sheet()
+		return
+	var idx := stack_at(c)
+	if idx < 0:
+		hide_sheet()
+		return
+	inspect_idx = idx
+	show_sheet()
+
+func on_command(pos: Vector2) -> void:
+	cmd_cell = Vector2i(-1, -1)
+	var c := cell_at_screen(pos)
+	if c.x < 0:
+		build_overlay()
+		return
+	command_at(c)
+	build_overlay()
+
+func on_command_hover(pos: Vector2) -> void:
+	var c := cell_at_screen(pos)
+	if c != cmd_cell:
+		cmd_cell = c
+		build_overlay()
+
+func on_command_hover_end() -> void:
+	if cmd_cell.x >= 0:
+		cmd_cell = Vector2i(-1, -1)
+		build_overlay()
+
+func on_hover(pos: Vector2) -> void:
+	var c := cell_at_screen(pos)
+	if c != hover_cell:
+		hover_cell = c
+		build_overlay()
