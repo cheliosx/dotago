@@ -1,0 +1,209 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://world/Terrain.gd" id="1_i3any"]
+[ext_resource type="Script" path="res://world/TreeScatter.gd" id="2_wpnig"]
+[ext_resource type="Script" path="res://world/Poi.gd" id="3_205rx"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_5aola"]
+sky_top_color = Color(0.35686275, 0.5568628, 0.76862746, 1)
+sky_horizon_color = Color(0.8039216, 0.8509804, 0.8862745, 1)
+ground_bottom_color = Color(0.29411766, 0.32156864, 0.2509804, 1)
+ground_horizon_color = Color(0.7254902, 0.7019608, 0.6039216, 1)
+sun_angle_max = 22.0
+
+[sub_resource type="Sky" id="Sky_spspv"]
+sky_material = SubResource("ProceduralSkyMaterial_5aola")
+
+[sub_resource type="Environment" id="Environment_so0in"]
+background_mode = 2
+sky = SubResource("Sky_spspv")
+ambient_light_source = 3
+ambient_light_energy = 0.45
+tonemap_mode = 3
+tonemap_exposure = 0.92
+fog_enabled = true
+fog_light_color = Color(0.7647059, 0.8, 0.83137256, 1)
+fog_density = 0.006
+fog_sky_affect = 0.4
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_mi464"]
+transparency = 1
+albedo_color = Color(0.13, 0.28, 0.38, 0.82)
+metallic = 0.35
+roughness = 0.12
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_2rhi7"]
+size = Vector2(312, 312)
+subdivide_width = 8
+subdivide_depth = 8
+
+[node name="WorldMap" type="Node3D" unique_id=2001695402]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1363384647]
+environment = SubResource("Environment_so0in")
+
+[node name="Sun" type="DirectionalLight3D" parent="." unique_id=137500433]
+transform = Transform3D(0.6156615, 0.56684744, -0.54739827, 0, 0.6946584, 0.7193398, 0.7880107, -0.4428698, 0.42767444, 0, 0, 0)
+light_color = Color(1, 0.9137255, 0.78431374, 1)
+light_energy = 1.15
+light_angular_distance = 0.6
+shadow_enabled = true
+directional_shadow_max_distance = 140.0
+
+[node name="Fill" type="DirectionalLight3D" parent="." unique_id=1297451392]
+transform = Transform3D(-0.76604444, -0.32139382, 0.5566704, 0, 0.8660254, 0.5, -0.64278764, 0.38302222, -0.66341394, 0, 0, 0)
+light_color = Color(0.5764706, 0.7137255, 0.8784314, 1)
+light_energy = 0.35
+
+[node name="Terrain" type="MeshInstance3D" parent="." unique_id=1290327729]
+script = ExtResource("1_i3any")
+height_scale = 7.5
+river_depth = 2.4
+
+[node name="Water" type="MeshInstance3D" parent="." unique_id=2099008869]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.12, 0)
+material_override = SubResource("StandardMaterial3D_mi464")
+mesh = SubResource("PlaneMesh_2rhi7")
+
+[node name="Trees" type="MultiMeshInstance3D" parent="." unique_id=169736308]
+script = ExtResource("2_wpnig")
+terrain_path = NodePath("../Terrain")
+tree_count = 420
+avoid_points = Array[Vector3]([Vector3(-36, 2.1142673, 8), Vector3(38, 4.8522143, 32), Vector3(44, 6.1396637, -12), Vector3(-18, 0.9964597, -48), Vector3(12, 4.030516, 44), Vector3(-16, 4.6035585, 20), Vector3(20, 6.1208243, 10), Vector3(-30, 1.3445019, -20), Vector3(6, 2.9232638, -8), Vector3(18, 5.494604, 28), Vector3(34, 6.4310484, 18), Vector3(-24, 2.3600018, 2), Vector3(28, 6.4878106, 40), Vector3(-22, 1.3453602, -12), Vector3(-24, 1.1911409, -32), Vector3(-6, 6.398052, 30), Vector3(32, 5.5297656, -8), Vector3(10, 4.4440284, 4)])
+avoid_radius = 8.0
+
+[node name="Pois" type="Node3D" parent="." unique_id=322288329]
+
+[node name="BasePlayer" type="Node3D" parent="Pois" unique_id=1687747602]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -36, 2.1142673, 8)
+script = ExtResource("3_205rx")
+kind = "base"
+title = "近卫营地"
+owner_id = "sentinel"
+guards = PackedStringArray("militia:14", "archer:6")
+
+[node name="BaseScourge" type="Node3D" parent="Pois" unique_id=1454507175]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 38, 4.8522143, 32)
+script = ExtResource("3_205rx")
+kind = "base"
+title = "寒骸堡"
+owner_id = "scourge"
+guards = PackedStringArray("ghoul:22", "skeleton_archer:12")
+
+[node name="BaseClaw" type="Node3D" parent="Pois" unique_id=560390616]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 44, 6.1396637, -12)
+script = ExtResource("3_205rx")
+kind = "base"
+title = "赤爪营地"
+owner_id = "claw"
+guards = PackedStringArray("ogre:10", "militia:18")
+
+[node name="BaseIron" type="Node3D" parent="Pois" unique_id=1216725404]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -18, 0.9964597, -48)
+script = ExtResource("3_205rx")
+kind = "base"
+title = "铁誓壁垒"
+owner_id = "iron"
+guards = PackedStringArray("knight:8", "archer:14")
+
+[node name="BaseAsh" type="Node3D" parent="Pois" unique_id=825539847]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12, 4.030516, 44)
+script = ExtResource("3_205rx")
+kind = "base"
+title = "灰烬祭坛"
+owner_id = "ash"
+guards = PackedStringArray("necromancer:8", "ghoul:16")
+
+[node name="MineGold1" type="Node3D" parent="Pois" unique_id=1890133456]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -16, 4.6035585, 20)
+script = ExtResource("3_205rx")
+title = "金矿"
+guards = PackedStringArray("kobold:10")
+
+[node name="MineGold2" type="Node3D" parent="Pois" unique_id=985522378]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 20, 6.1208243, 10)
+script = ExtResource("3_205rx")
+title = "富金矿"
+guards = PackedStringArray("wolf:8")
+
+[node name="Lumber1" type="Node3D" parent="Pois" unique_id=1798685248]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -30, 1.3445019, -20)
+script = ExtResource("3_205rx")
+title = "伐木场"
+resource = "wood"
+guards = PackedStringArray("kobold:8")
+
+[node name="Lumber2" type="Node3D" parent="Pois" unique_id=762823706]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6, 2.9232638, -8)
+script = ExtResource("3_205rx")
+title = "北岭伐木场"
+resource = "wood"
+guards = PackedStringArray("ogre:5")
+
+[node name="MineOre" type="Node3D" parent="Pois" unique_id=399837679]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 18, 5.494604, 28)
+script = ExtResource("3_205rx")
+title = "秘银矿脉"
+resource = "ore"
+guards = PackedStringArray("wolf:9")
+
+[node name="MineCrystal" type="Node3D" parent="Pois" unique_id=1408983590]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 34, 6.4310484, 18)
+script = ExtResource("3_205rx")
+title = "水晶矿洞"
+resource = "crystal"
+guards = PackedStringArray("golem:4")
+
+[node name="TownSilver" type="Node3D" parent="Pois" unique_id=2087222137]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -24, 2.3600018, 2)
+script = ExtResource("3_205rx")
+kind = "town"
+title = "银月城"
+owner_id = "sentinel"
+guards = PackedStringArray()
+
+[node name="TownScourge" type="Node3D" parent="Pois" unique_id=604507166]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 28, 6.4878106, 40)
+script = ExtResource("3_205rx")
+kind = "town"
+title = "霜歌城"
+owner_id = "scourge"
+guards = PackedStringArray()
+
+[node name="Tavern" type="Node3D" parent="Pois" unique_id=1278100728]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -22, 1.3453602, -12)
+script = ExtResource("3_205rx")
+kind = "tavern"
+title = "血月酒馆"
+guards = PackedStringArray()
+
+[node name="Smith" type="Node3D" parent="Pois" unique_id=2087912732]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -24, 1.1911409, -32)
+script = ExtResource("3_205rx")
+kind = "smith"
+title = "铁砧铁匠铺"
+guards = PackedStringArray()
+
+[node name="CampWolf" type="Node3D" parent="Pois" unique_id=515208052]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -6, 6.398052, 30)
+script = ExtResource("3_205rx")
+kind = "camp"
+title = "腐化狼穴"
+guards = PackedStringArray("wolf:10")
+
+[node name="CampOgre" type="Node3D" parent="Pois" unique_id=1454878752]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 32, 5.5297656, -8)
+script = ExtResource("3_205rx")
+kind = "camp"
+title = "食人魔营地"
+guards = PackedStringArray("ogre:6")
+
+[node name="CampGolem" type="Node3D" parent="Pois" unique_id=273773180]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10, 4.4440284, 4)
+script = ExtResource("3_205rx")
+kind = "camp"
+title = "远古遗迹"
+guards = PackedStringArray("golem:5")
+
+[node name="HeroSpawn" type="Marker3D" parent="." unique_id=529725631]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -34, 2.1314979, -4)

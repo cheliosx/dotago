@@ -74,6 +74,8 @@ func snapshot() -> Dictionary:
 		"mines": Game.mines,
 		"camps": Game.camps,
 		"caches": Game.caches,
+		"bases": Game.bases,
+		"factions": Game.factions,
 		"heroes": Game.heroes,
 		"id_counter": Game.id_counter,
 		"selected": Game.selected,

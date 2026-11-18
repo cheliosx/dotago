@@ -37,7 +37,7 @@ func _process(_delta) -> bool:
 			if err > 0.001 or ctr_err > 0.001:
 				note("!! 六边形图层错位，请检查 Hex.polygon")
 		2:
-			G.new_game("crystal_maiden")
+			G.new_game("crystal_maiden", "", false)
 			G.goto("world", {})
 			var h = G.selected_hero()
 			note("新游戏：第%d天 资源%s 英雄%s 部队%d支 地图%d格 迷雾%d格" % [G.day, str(G.res), h.name, h.army.size(), G.tiles.size(), G.explored.size()])
@@ -141,6 +141,8 @@ func _process(_delta) -> bool:
 					sz.close()
 				# 自动存档：结束回合后应把新的一天写回同一份存档
 				G.end_turn()
+				while G.awaiting_defense:
+					G.resolve_defense(true)
 				var day_now: int = G.day
 				var reread := {}
 				for m in S.list():
@@ -152,6 +154,48 @@ func _process(_delta) -> bool:
 				S.delete_save(id2)
 				note("清理后存档数 = %d" % S.list().size())
 		9:
+			note("=== 多势力对抗 ===")
+			G.new_game("crystal_maiden", "", true)
+			note("势力 %d 个，营地 %d，矿场/伐木场 %d，英雄 %d" % [
+				G.factions.size(), G.bases.size(), G.mines.size(), G.heroes.size()])
+			var my_base := {}
+			for b in G.bases:
+				if String(b.owner) == String(G.faction):
+					my_base = b
+					break
+			note("玩家营地 = %s，初始驻军战力 %d" % [
+				String(my_base.get("name", "无")), G.garrison_strength(my_base)])
+			var h3: Dictionary = G.selected_hero()
+			var uid := String((h3.army as Array)[0].unit)
+			var before := int((h3.army as Array)[0].count)
+			G.garrison_add(my_base, uid, 3, h3)
+			note("派 3 兵驻守：英雄 %d→%d，驻军战力 %d" % [
+				before, int((h3.army as Array)[0].count), G.garrison_strength(my_base)])
+			G.garrison_take(my_base, uid, 2, h3)
+			note("撤回 2 兵后驻军战力 %d" % G.garrison_strength(my_base))
+			var g0 := int(G.res.gold)
+			var w0 := int(G.res.wood)
+			var rmsg: String = G.recruit(int(my_base.id), "archer", 5)
+			note("%s（金 %d→%d，木 %d→%d）" % [rmsg, g0, int(G.res.gold), w0, int(G.res.wood)])
+			var mine2: Dictionary = G.mines[0]
+			mine2.owner = G.faction
+			mine2.garrison = [{"unit": "militia", "count": 6}]
+			var foe := {}
+			for x in G.heroes:
+				if bool(x.is_ai):
+					foe = x
+					break
+			foe["wpos"] = (mine2.wpos as Vector3) + Vector3(4, 0, 0)
+			foe.army = [{"unit": "ogre", "count": 40}]
+			var day_before: int = G.day
+			G.end_turn()
+			note("告急队列 %d（应 ≥1），awaiting=%s" % [
+				(G.pending_defenses as Array).size(), str(G.awaiting_defense)])
+			while G.awaiting_defense:
+				G.resolve_defense(true)
+			note("全部撤退后：该矿场归属=%s，第%d天（应 %d）" % [
+				String(mine2.owner), G.day, day_before + 1])
+		10:
 			note("=== 集成测试完成，共 %d 步 ===" % stage)
 			return true
 	return false

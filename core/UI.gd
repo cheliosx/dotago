@@ -19,6 +19,7 @@ const C_PURPLE   := Color("#b48ae0")
 
 static var _font: Font = null
 static var _theme: Theme = null
+static var _world_font: Font = null
 
 static func font() -> Font:
 	if _font == null:
@@ -27,6 +28,16 @@ static func font() -> Font:
 			f = ThemeDB.fallback_font
 		_font = f
 	return _font
+
+## 地图上 Label3D 用的加粗字体：Noto Sans SC 只有一个字重，
+## 用 FontVariation 的 embolden 现场加粗，配合大描边才在 3D 里看得清。
+static func world_font() -> Font:
+	if _world_font == null:
+		var fv := FontVariation.new()
+		fv.base_font = font()
+		fv.variation_embolden = 0.9
+		_world_font = fv
+	return _world_font
 
 static func theme() -> Theme:
 	if _theme == null:

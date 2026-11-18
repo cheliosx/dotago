@@ -21,16 +21,11 @@ func _process(_d) -> bool:
 			step = 1
 		1:
 			G.new_game("crystal_maiden")
-			G.goto("world", {})
-			view = _content()
-			step = 2
-		2:
+			# 直接从大地图发起一场战斗（主地图已改成连续地形，不再有 move_to_cell）
 			var camp = G.camps[0]
 			var h = G.selected_hero()
-			h.pos = Hex.neighbors(camp.pos)[0]
 			h.mp = 40
-			G.changed.emit()
-			view.call("move_to_cell", camp.pos)
+			G.start_battle(h, camp, camp.guards, "camp", "plain")
 			step = 3
 			timer = 0
 		3:

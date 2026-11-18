@@ -31,6 +31,7 @@ var pitch := deg_to_rad(56.0)
 var map_bounds := Rect2()
 var clamp_bounds := true
 var bounds_margin := 3.0
+var cam_max := CAM_MAX   # 主地图需要拉很远看全局，子类可以调大
 
 var pointers := {}
 var tap_pos := Vector2.ZERO
@@ -40,6 +41,11 @@ var pinch_prev := -1.0
 var pinch_mid := Vector2.ZERO
 var cmd_drag := false
 var multi := false   # 本次手势用过双指：结束时不触发查看/指令
+
+## 手势模式：战场需要「按住拖动 = 下指令」，主地图需要「拖动 = 平移镜头」。
+## 子类在 _ready() 里把这两个开关调成自己需要的形态。
+var drag_commands := true      # 单指按住拖动是否下指令（false 则一律平移）
+var right_click_commands := true  # 鼠标右键是否下指令
 
 var sheet: PanelContainer
 var sheet_shown := false
@@ -139,7 +145,7 @@ func _pan(d: Vector2) -> void:
 	_clamp_focus()
 
 func zoom_by(factor: float, animated: bool = true) -> void:
-	dist_target = clampf(dist_target * factor, CAM_MIN, CAM_MAX)
+	dist_target = clampf(dist_target * factor, CAM_MIN, cam_max)
 	if not animated:
 		dist = dist_target
 		_update_camera()
@@ -174,8 +180,8 @@ func _gui_input(event: InputEvent) -> void:
 		elif event.pressed and event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			zoom_by(1.14)
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
-			# 鼠标右键 = 下指令（移动 / 攻击 / 施法）
-			if event.pressed:
+			# 鼠标右键 = 下指令（移动 / 攻击 / 施法）；主地图关闭这个行为
+			if event.pressed and right_click_commands:
 				on_command(event.position)
 		elif event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
@@ -222,9 +228,11 @@ func _drag(key: int, pos: Vector2) -> void:
 			return
 		if key == MOUSE_KEY:
 			_pan(pos - prev)     # 桌面：左键拖动平移
-		else:
+		elif drag_commands:
 			cmd_drag = true      # 触摸：按住拖动 = 下指令
 			on_command_hover(pos)
+		else:
+			_pan(pos - prev)     # 触摸：拖动 = 平移镜头
 	elif pointers.size() == 2:
 		var pts := pointers.values()
 		var a: Vector2 = pts[0]
@@ -382,18 +390,25 @@ func add_cyl(parent: Node3D, pos: Vector3, radius: float, height: float, col: Co
 func add_cone(parent: Node3D, pos: Vector3, radius: float, height: float, col: Color, segs: int = 6) -> MeshInstance3D:
 	return add_cyl(parent, pos, radius, height, col, segs, 0.0)
 
-func add_label(parent: Node3D, text: String, pos: Vector3, col: Color, size_px: int = 42, billboard: bool = true) -> Label3D:
+func add_label(parent: Node3D, text: String, pos: Vector3, col: Color, size_px: int = 42, billboard: bool = true, ignore_depth: bool = false) -> Label3D:
+	# 单层 + 引擎内置描边。不要再叠两层 Label3D：两层共面会 z-fighting，
+	# 截图上会变成黑白噪点（实测过）。
+	# 也不要开 alpha_cut = OPAQUE_PREPASS：它会和描边打架，字形被啃成镂空轮廓。
+	var fs := size_px * 2
 	var l := Label3D.new()
 	l.text = text
-	l.font = UI.font()
-	l.font_size = size_px
-	l.pixel_size = 0.0085
+	l.font = UI.world_font()
+	l.font_size = fs
+	l.pixel_size = 0.0074
 	l.modulate = col
-	l.outline_size = 5
-	l.outline_modulate = Color(0, 0, 0, 0.85)
+	l.outline_size = maxi(6, int(round(float(fs) * 0.105)))
+	l.outline_modulate = Color(0, 0, 0, 1)
 	l.billboard = BaseMaterial3D.BILLBOARD_ENABLED if billboard else BaseMaterial3D.BILLBOARD_DISABLED
-	l.no_depth_test = false
-	# 文字不投影：Label3D 默认会投影，文字影子贴在旁边地形上看起来像重影
+	# 大地图让名牌压过树和地形（战场保持正常深度，避免前后单位字互相盖住）
+	l.no_depth_test = ignore_depth
+	l.render_priority = 2 if ignore_depth else 0
+	# 缩小时必须走 mipmap，否则字形贴图会采样成黑白噪点
+	l.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
 	l.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	l.position = pos
 	parent.add_child(l)

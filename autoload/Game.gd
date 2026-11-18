@@ -6,6 +6,8 @@ signal changed
 signal goto_view(view: String, payload: Dictionary)
 signal toast(text: String)
 signal popup(title: String, body: String, cb: Callable)
+## 有势力正在进攻玩家的据点，需要玩家选「死守 / 撤退」
+signal defense_prompt
 
 const COLS := 26
 const ROWS := 17
@@ -19,6 +21,8 @@ var towns := []
 var mines := []
 var camps := []
 var caches := []
+var bases := []          # 势力营地（每方一个，被占领 = 该势力失去根基）
+var factions := []       # 势力状态：id/name/color/alive/is_player/base_poi
 var heroes := []
 var id_counter := 1
 var selected := 0
@@ -32,13 +36,18 @@ var pending_battle := {}
 var game_over := ""
 var ai_power := 0
 var turn_busy := false
+var pending_defenses := []   # 本回合 AI 打到玩家据点的记录，等玩家逐个决定
+var awaiting_defense := false
 var save_slot := ""   # 当前存档 id（对应 autoload/Saves 里的文件）
+var use_map_world := false
+var map_spawn := Vector3.ZERO
+var map_terrain = null   # 主地图 Terrain 节点（WorldMapView 赋值），AI 用它判断能否走
 
 # ------------------------------------------------------------------ 初始化
 func _ready() -> void:
 	rng.randomize()
 
-func new_game(hero_key: String, hero_name: String = "") -> void:
+func new_game(hero_key: String, hero_name: String = "", use_map: bool = true) -> void:
 	rng.randomize()
 	day = 1
 	res = {"gold": 6500, "wood": 22, "ore": 16, "crystal": 8, "essence": 3}
@@ -56,26 +65,60 @@ func new_game(hero_key: String, hero_name: String = "") -> void:
 	pending_battle = {}
 	game_over = ""
 	ai_power = 0
+	bases = []
+	factions = []
+	pending_defenses = []
+	awaiting_defense = false
 
-	generate_terrain()
-	place_world()
+	use_map_world = use_map
+	if use_map:
+		build_map_world()
+	else:
+		generate_terrain()
+		place_world()
 
 	var start := Vector2i(4, 13)
-	force_clear(start)
+	var spawn := Vector3.ZERO
+	if use_map:
+		start = Vector2i(roundi(map_spawn.x), roundi(map_spawn.z))
+		spawn = map_spawn
+		# 开局站在自己营地门口，方便立刻招募与派兵
+		if not factions.is_empty():
+			var pb := base_of(faction)
+			if not pb.is_empty():
+				spawn = (pb.wpos as Vector3) + Vector3(0, 0, 7.0)
+				spawn.y = pb.wpos.y
+				start = Vector2i(roundi(spawn.x), roundi(spawn.z))
+	else:
+		force_clear(start)
 	var h := create_hero(hero_key, false, start)
+	h["wpos"] = spawn if use_map else Vector3.ZERO
 	var custom := hero_name.strip_edges()
 	if custom != "":
 		h.name = custom
 	selected = h.id
-	var eh1 := create_hero("skeleton_king", true, Vector2i(20, 2))
-	eh1.army = [{"unit": "ghoul", "count": 26}, {"unit": "skeleton_archer", "count": 12}, {"unit": "ogre", "count": 4}]
-	var eh2 := create_hero("lich", true, Vector2i(22, 4))
-	eh2.army = [{"unit": "ghoul", "count": 18}, {"unit": "skeleton_archer", "count": 18}, {"unit": "necromancer", "count": 5}]
+	if use_map and not factions.is_empty():
+		# 每个敌对势力一位统帅，守在自己的营地
+		for f in factions:
+			if bool(f.is_player):
+				continue
+			var b := base_of(String(f.id))
+			if b.is_empty():
+				continue
+			var eh := create_hero(String(f.hero_def), true, Vector2i(roundi(b.wpos.x), roundi(b.wpos.z)), String(f.id))
+			eh["wpos"] = b.wpos + Vector3(3.0, 0.0, 2.5)
+			eh["pos"] = Vector2i(roundi(eh.wpos.x), roundi(eh.wpos.z))
+			eh.level = 2
+	else:
+		var eh1 := create_hero("skeleton_king", true, Vector2i(20, 2))
+		eh1.army = [{"unit": "ghoul", "count": 26}, {"unit": "skeleton_archer", "count": 12}, {"unit": "ogre", "count": 4}]
+		var eh2 := create_hero("lich", true, Vector2i(22, 4))
+		eh2.army = [{"unit": "ghoul", "count": 18}, {"unit": "skeleton_archer", "count": 18}, {"unit": "necromancer", "count": 5}]
 
-	add_log("第 1 天 · %s 在银月城接过近卫军团的旌旗。" % h.name)
-	add_log("目标：夺取矿脉、扩张城镇、击溃天灾军团。")
+	add_log("第 1 天 · %s 在营地接过近卫军团的旌旗。" % h.name)
+	add_log("目标：占领金矿与伐木场，消灭地图上所有敌对势力。")
 	# 大图上开局先给一片已知区域，否则只剩脚下几格亮着，看不出地形骨架
-	for src in [start, Vector2i(3, 13)]:
+	for src in ([start, Vector2i(3, 13)] if not use_map else []):
 		for key in tiles:
 			var cc: Vector2i = tiles[key].c
 			if Hex.dist(src, cc) <= 6:
@@ -173,7 +216,8 @@ func make_town(n: String, p: Vector2i, owner: String, b: Dictionary) -> Dictiona
 
 func make_mine(r: String, p: Vector2i, guards: Array) -> Dictionary:
 	return {"id": next_id(), "kind": "mine", "name": DB.MINE_NAMES[r], "pos": p,
-			"res": r, "owner": "", "guards": guards.duplicate(true), "guarded": guards.size() > 0}
+			"res": r, "owner": "", "guards": guards.duplicate(true), "guarded": guards.size() > 0,
+			"garrison": []}
 
 func make_camp(n: String, p: Vector2i, guards: Array, reward: Dictionary) -> Dictionary:
 	return {"id": next_id(), "kind": "camp", "name": n, "pos": p,
@@ -188,11 +232,11 @@ func next_id() -> int:
 	return i
 
 # ------------------------------------------------------------------ 英雄
-func create_hero(def_id: String, is_ai: bool, pos: Vector2i) -> Dictionary:
+func create_hero(def_id: String, is_ai: bool, pos: Vector2i, fac: String = "") -> Dictionary:
 	var d: Dictionary = DB.HEROES[def_id]
 	var h := {
 		"id": next_id(), "def": def_id, "name": d.name, "en": d.en, "title": d.title,
-		"color": d.color, "klass": d.klass, "faction": d.faction, "is_ai": is_ai,
+		"color": d.color, "klass": d.klass, "faction": (fac if fac != "" else String(d.faction)), "is_ai": is_ai,
 		"level": 1, "xp": 0, "atk": d.atk, "defense": d.def, "power": d.power, "knowledge": d.knowledge,
 		"skill": d.skills.duplicate(), "skill_points": 0,
 		"items": {"weapon": "", "armor": "", "helm": "", "boots": "", "trinket": "", "book": ""},
@@ -316,6 +360,136 @@ func learn_skill(h: Dictionary, skill_id: String) -> String:
 	add_log("%s 的「%s」提升到 %d 级。" % [h.name, DB.SKILLS[skill_id].name, cur + 1])
 	changed.emit()
 	return "习得成功"
+
+## 从可编辑场景 world/WorldMap.tscn 读取兴趣点，生成本局的世界数据。
+## 场景负责「摆在哪、叫什么」，Game 负责「谁占领、有多少守军」等动态状态。
+func build_map_world() -> void:
+	towns = []
+	mines = []
+	camps = []
+	caches = []
+	bases = []
+	factions = []
+	var ps: PackedScene = load("res://world/WorldMap.tscn")
+	if ps == null:
+		push_error("WorldMap.tscn 载入失败")
+		return
+	var inst := ps.instantiate()
+	for n in _walk(inst):
+		if n is Marker3D and n.name == "HeroSpawn":
+			map_spawn = (n as Marker3D).position
+			continue
+		if not n.has_method("guard_list"):
+			continue
+		var w: Vector3 = (n as Node3D).position
+		var hexp := Vector2i(roundi(w.x), roundi(w.z))
+		var guards: Array = n.call("guard_list")
+		match String(n.kind):
+			"town":
+				towns.append({"id": next_id(), "kind": "town", "name": String(n.title),
+					"pos": hexp, "owner": String(n.owner_id), "buildings": {"hall": 1},
+					"garrison": [], "guarded": false, "wpos": w, "poi": String(n.name)})
+			"mine":
+				mines.append({"id": next_id(), "kind": "mine", "name": String(n.title),
+					"pos": hexp, "res": String(n.resource), "owner": "",
+					"guards": guards, "guarded": guards.size() > 0, "wpos": w, "poi": String(n.name)})
+			"camp":
+				var cnt := 0
+				for g in guards:
+					cnt += int(g.count)
+				camps.append({"id": next_id(), "kind": "camp", "name": String(n.title),
+					"pos": hexp, "guards": guards, "guarded": true,
+					"reward": {"gold": 700 + cnt * 70, "crystal": 2},
+					"wpos": w, "poi": String(n.name)})
+			"base":
+				bases.append({"id": next_id(), "kind": "base", "name": String(n.title),
+					"pos": hexp, "owner": String(n.owner_id), "garrison": guards,
+					"wpos": w, "poi": String(n.name)})
+	inst.free()
+	# 玩家初始城镇补一点驻军，避免开局空城
+	for t in towns:
+		if t.owner == faction and (t.garrison as Array).is_empty():
+			t.garrison = [{"unit": "militia", "count": 10}]
+	for m in mines:
+		if not m.has("garrison"):
+			m["garrison"] = []
+	init_factions()
+
+## 每个 base 对应一方势力。hero_def 决定该势力统帅用哪位英雄的数据。
+const FACTION_HERO_DEFS := {
+	"scourge": "lich", "claw": "axe", "iron": "skeleton_king", "ash": "nevermore",
+}
+
+func init_factions() -> void:
+	factions = []
+	for b in bases:
+		var id := String(b.owner)
+		if id == "":
+			continue
+		if _find_faction(id).size() > 0:
+			continue
+		var d: Dictionary = DB.FACTIONS.get(id, DB.FACTIONS["neutral"])
+		factions.append({
+			"id": id, "name": String(d.name), "color": String(d.color),
+			"desc": String(d.get("desc", "")),
+			"alive": true, "is_player": id == faction,
+			"hero_def": String(FACTION_HERO_DEFS.get(id, "skeleton_king")),
+		})
+
+func _find_faction(id: String) -> Dictionary:
+	for f in factions:
+		if String(f.id) == id:
+			return f
+	return {}
+
+func faction_name(id: String) -> String:
+	if id == "":
+		return "无主"
+	var d: Dictionary = DB.FACTIONS.get(id, {})
+	return String(d.get("name", id)) if not d.is_empty() else id
+
+func faction_color(id: String) -> Color:
+	var d: Dictionary = DB.FACTIONS.get(id, {})
+	return Color(d.get("color", "#b8ac90")) if not d.is_empty() else Color("#b8ac90")
+
+## 势力自己的营地（被占领后 owner 会变，所以不能只按 owner 找）
+func base_of(fac_id: String) -> Dictionary:
+	for b in bases:
+		if String(b.owner) == fac_id:
+			return b
+	return {}
+
+func base_by_poi(poi_name: String) -> Dictionary:
+	for b in bases:
+		if String(b.get("poi", "")) == poi_name:
+			return b
+	return {}
+
+## 某势力还活着吗：有营地或有英雄
+func faction_alive(fac_id: String) -> bool:
+	for b in bases:
+		if String(b.owner) == fac_id:
+			return true
+	for h in heroes:
+		if bool(h.alive) and String(h.faction) == fac_id:
+			return true
+	return false
+
+func player_power() -> int:
+	var n := 0
+	for b in bases:
+		if String(b.owner) == faction:
+			n += 1
+	for m in mines:
+		if String(m.owner) == faction:
+			n += 1
+	return n
+
+func _walk(n: Node) -> Array:
+	var out := [n]
+	for c in n.get_children():
+		out.append_array(_walk(c))
+	return out
 
 # ------------------------------------------------------------------ 地图查询
 func tile(c: Vector2i) -> Dictionary:
@@ -477,14 +651,15 @@ func arrive(h: Dictionary, pos: Vector2i) -> void:
 			toast.emit("%s：%s" % [ref.name, DB.res_text(ref.reward)])
 			caches.erase(ref)
 		"mine":
-			if ref.owner == faction:
-				toast.emit("这座%s已归近卫军团所有" % ref.name)
+			if ref.owner == String(h.faction):
+				if not h.is_ai:
+					toast.emit("这座%s已经属于你的势力" % ref.name)
 			elif ref.guarded and not h.is_ai:
 				start_battle(h, ref, ref.guards, "mine")
 			else:
 				capture_mine(h, ref)
 		"town":
-			if ref.owner == faction:
+			if ref.owner == String(h.faction):
 				toast.emit("进入 %s" % ref.name)
 			elif ref.guarded and not h.is_ai:
 				start_battle(h, ref, ref.garrison, "town")
@@ -501,20 +676,48 @@ func arrive(h: Dictionary, pos: Vector2i) -> void:
 					auto_battle_ai(h, ref)
 
 func capture_mine(h: Dictionary, m: Dictionary) -> void:
-	var f := faction if not h.is_ai else enemy_faction
+	var f := String(h.faction)
+	var old_owner := String(m.owner)
 	m.owner = f
 	m.guarded = false
 	m.guards = []
-	add_log("%s 占领了%s，每日产出 %s。" % [h.name, m.name, DB.RES[m.res].name])
-	toast.emit("占领 %s！" % m.name)
+	m["garrison"] = []
+	add_log("%s 占领了%s，每日产出 %d %s。" % [h.name, m.name, int(DB.RES[m.res].daily), DB.RES[m.res].name])
+	if f == faction:
+		toast.emit("占领 %s！" % m.name)
+	elif old_owner == faction:
+		add_log("%s 被%s夺走了！" % [m.name, faction_name(f)])
+	check_game_over()
+	changed.emit()
 
 func capture_town(h: Dictionary, t: Dictionary) -> void:
-	var f := faction if not h.is_ai else enemy_faction
+	var f := String(h.faction)
+	var old_owner := String(t.owner)
 	t.owner = f
 	t.guarded = false
 	t.garrison = []
 	add_log("%s 拿下了 %s。" % [h.name, t.name])
-	toast.emit("占领 %s！" % t.name)
+	if f == faction:
+		toast.emit("占领 %s！" % t.name)
+	elif old_owner == faction:
+		add_log("%s 失守了！" % t.name)
+	check_game_over()
+	changed.emit()
+
+## 营地被攻破：该势力失去根基，只剩英雄还在流窜
+func capture_base(h: Dictionary, b: Dictionary, keep_garrison: bool = false) -> void:
+	var f := String(h.faction)
+	var old_owner := String(b.owner)
+	b.owner = f
+	if not keep_garrison:
+		b.garrison = []
+	add_log("%s 攻破了 %s 的营地！" % [h.name, faction_name(old_owner)])
+	if f == faction:
+		toast.emit("攻破 %s！" % b.name)
+	elif old_owner == faction:
+		add_log("我们的营地 %s 陷落了。" % b.name)
+	check_game_over()
+	changed.emit()
 
 func auto_battle_ai(attacker: Dictionary, defender: Dictionary) -> void:
 	# AI 之间的战斗用战力快速结算，保证回合节奏
@@ -540,7 +743,7 @@ func battle_reward(army: Array, kind: String) -> Dictionary:
 		r.essence = 1
 	return r
 
-func start_battle(h: Dictionary, ref: Dictionary, enemy_army: Array, kind: String) -> void:
+func start_battle(h: Dictionary, ref: Dictionary, enemy_army: Array, kind: String, biome_override: String = "") -> void:
 	var enemy_hero_data: Dictionary = {}
 	if kind == "hero":
 		enemy_hero_data = {
@@ -559,7 +762,7 @@ func start_battle(h: Dictionary, ref: Dictionary, enemy_army: Array, kind: Strin
 		"ref": ref,
 		"reward": battle_reward(enemy_army, kind),
 		"xp": int(clampf(float(army_strength(enemy_army)) * 0.55, 120, 9000)),
-		"biome": terrain(h.pos),
+		"biome": biome_override if biome_override != "" else terrain(h.pos),
 	}
 	goto("battle", {})
 
@@ -591,6 +794,8 @@ func finish_battle(win: bool, survivors: Array, mana_left: int) -> Dictionary:
 				capture_town(h, ref)
 				if not ref.buildings.has("hall"):
 					ref.buildings.hall = 1
+			"base":
+				capture_base(h, ref)
 			"camp":
 				camps.erase(ref)
 				var keys := DB.ITEMS.keys()
@@ -606,12 +811,22 @@ func finish_battle(win: bool, survivors: Array, mana_left: int) -> Dictionary:
 	else:
 		h.army = [{"unit": "militia", "count": 8}]
 		h.mp = 0
+		var home := {}
 		for t in towns:
-			if t.owner == faction:
-				h.pos = t.pos
+			if String(t.owner) == faction:
+				home = t
 				break
+		if home.is_empty():
+			for bb in bases:
+				if String(bb.owner) == faction:
+					home = bb
+					break
+		if not home.is_empty():
+			h.pos = home.pos
+			if use_map_world and home.has("wpos"):
+				h["wpos"] = home.wpos + Vector3(0, 0, 3.0)
 		h.mana = max_mana(h)
-		add_log("%s 战败撤退到最近的城镇，部队损失殆尽。" % h.name)
+		add_log("%s 战败撤退，部队损失殆尽。" % h.name)
 	compute_vision()
 	check_game_over()
 	changed.emit()
@@ -620,16 +835,23 @@ func finish_battle(win: bool, survivors: Array, mana_left: int) -> Dictionary:
 # ------------------------------------------------------------------ 经济与建造
 func income() -> void:
 	var earned := {}
+	# 城镇：大厅产金，仓库补各种资源
 	for t in towns:
 		if t.owner == faction:
 			earned.gold = int(earned.get("gold", 0)) + 500 * int(t.buildings.get("hall", 0))
 			if t.buildings.has("silo"):
 				for k in ["wood", "ore", "crystal", "essence"]:
 					earned[k] = int(earned.get(k, 0)) + 1
+	# 营地（都城）：基础收入，撑着早期经济
+	for b in bases:
+		if b.owner == faction:
+			earned.gold = int(earned.get("gold", 0)) + 600
+			earned.wood = int(earned.get("wood", 0)) + 6
+	# 矿场 / 伐木场：只有归属你的才产出；被别的势力拿着就变成对方的力量
 	for m in mines:
 		if m.owner == faction:
 			earned[m.res] = int(earned.get(m.res, 0)) + int(DB.RES[m.res].daily)
-		elif m.owner == enemy_faction:
+		elif m.owner != "":
 			ai_power += 1
 	DB.gain(res, earned)
 	if not earned.is_empty():
@@ -661,46 +883,149 @@ func build(town_id: int, bid: String) -> String:
 	changed.emit()
 	return "建造完成：" + d.name
 
-func recruit(town_id: int, unit_id: String, count: int) -> String:
-	var t := find_by_id(towns, town_id)
+## 据点（城镇或营地）与英雄的距离：主地图用米，六边形地图用格
+func site_distance(h: Dictionary, site: Dictionary) -> float:
+	if use_map_world and site.has("wpos"):
+		var hw: Vector3 = h.get("wpos", Vector3.ZERO)
+		var sw: Vector3 = site.get("wpos", Vector3.ZERO)
+		return Vector2(hw.x - sw.x, hw.z - sw.z).length()
+	return float(Hex.dist(h.pos, site.pos))
+
+func site_by_id(site_id: int) -> Dictionary:
+	for t in towns:
+		if int(t.id) == site_id:
+			return t
+	for b in bases:
+		if int(b.id) == site_id:
+			return b
+	for m in mines:
+		if int(m.id) == site_id:
+			return m
+	return {}
+
+## 兵种价格：金币 + 木材（每 200 金折 1 木）
+func unit_cost(unit_id: String, count: int) -> Dictionary:
+	var u: Dictionary = DB.UNITS[unit_id]
+	var gold := int(u.cost) * count
+	return {"gold": gold, "wood": maxi(1, int(ceil(float(gold) / 200.0)))}
+
+func recruit(site_id: int, unit_id: String, count: int) -> String:
+	var t := site_by_id(site_id)
 	var h := selected_hero()
 	if t.is_empty() or h.is_empty():
 		return "无法招募"
-	if t.owner != faction:
-		return "城镇不属于你"
-	if Hex.dist(t.pos, h.pos) > 2:
-		return "英雄必须驻扎在城镇附近"
-	var u: Dictionary = DB.UNITS[unit_id]
-	var cost := {"gold": int(u.cost) * count}
+	if String(t.owner) != faction:
+		return "据点不属于你"
+	if not DB.RECRUITS.get(String(h.faction), []).has(unit_id):
+		return "你的势力无法招募该兵种"
+	if site_distance(h, t) > (16.0 if use_map_world else 2.0):
+		return "英雄必须驻扎在据点附近"
+	var cost := unit_cost(unit_id, count)
 	if not DB.can_afford(res, cost):
-		return "金币不足，需要 %d" % int(cost.gold)
+		var short := ""
+		for k in cost:
+			if int(res.get(k, 0)) < int(cost[k]):
+				short += "%s缺 %d  " % [DB.RES[k].name, int(cost[k]) - int(res.get(k, 0))]
+		return "资源不足：" + short.strip_edges()
 	DB.pay(res, cost)
 	army_add(h, unit_id, count)
 	changed.emit()
-	return "招募了 %d 名%s" % [count, u.name]
+	return "招募了 %d 名%s" % [count, DB.UNITS[unit_id].name]
 
-func hire_hero(town_id: int, def_id: String) -> String:
-	var t := find_by_id(towns, town_id)
-	if t.is_empty() or not t.buildings.has("tavern"):
+func hire_hero(site_id: int, def_id: String) -> String:
+	var t := site_by_id(site_id)
+	if t.is_empty():
+		return "找不到据点"
+	# 城镇需要酒馆；自己的营地本身就是招募点
+	if String(t.kind) == "town" and not (t.get("buildings", {}) as Dictionary).has("tavern"):
 		return "需要酒馆"
-	if not DB.can_afford(res, {"gold": 2500}):
-		return "金币不足，需要 2500"
+	if String(t.owner) != faction:
+		return "据点不属于你"
+	var cost := {"gold": 2500, "wood": 8}
+	if not DB.can_afford(res, cost):
+		return "需要 2500 金币与 8 木材"
 	if DB.HEROES[def_id].faction != faction:
 		return "该英雄不属于近卫军团"
 	for h in heroes:
 		if h.def == def_id:
 			return "这位英雄已经在你的麾下"
-	DB.pay(res, {"gold": 2500})
+	DB.pay(res, cost)
 	var pos: Vector2i = t.pos
-	for n in Hex.neighbors(t.pos):
-		if not blocked(n) and terrain_cost(n) < 99:
-			pos = n
-			break
+	if use_map_world:
+		for n in Hex.neighbors(t.pos):
+			if not blocked(n) and terrain_cost(n) < 99:
+				pos = n
+				break
 	var nh := create_hero(def_id, false, pos)
-	add_log("%s 在 %s 的酒馆加入了近卫军团。" % [nh.name, t.name])
+	if use_map_world and t.has("wpos"):
+		nh["wpos"] = t.wpos + Vector3(0, 0, 4.0)
+	add_log("%s 加入了近卫军团，驻地 %s。" % [nh.name, t.name])
 	compute_vision()
 	changed.emit()
 	return "%s 已加入" % nh.name
+
+# ------------------------------------------------------------------ 驻军
+func garrison_strength(site: Dictionary) -> int:
+	return army_strength(site.get("garrison", []))
+
+## 从英雄部队抽调兵力驻守据点
+func garrison_add(site: Dictionary, unit_id: String, count: int, h: Dictionary) -> String:
+	var have := 0
+	for s in h.army:
+		if s.unit == unit_id:
+			have = int(s.count)
+	var n := mini(count, have)
+	if n <= 0:
+		return "没有可派出的部队"
+	for s in h.army:
+		if s.unit == unit_id:
+			s.count -= n
+	h.army = h.army.filter(func(x): return int(x.count) > 0)
+	if not site.has("garrison"):
+		site["garrison"] = []
+	var found := false
+	for g in site.garrison:
+		if String(g.unit) == unit_id:
+			g.count = int(g.count) + n
+			found = true
+			break
+	if not found:
+		site.garrison.append({"unit": unit_id, "count": n})
+	add_log("%s 派出 %d 名%s驻守 %s。" % [h.name, n, DB.UNITS[unit_id].name, site.name])
+	changed.emit()
+	return "驻守 %d 名%s" % [n, DB.UNITS[unit_id].name]
+
+## 把据点驻军收回英雄部队
+func garrison_take(site: Dictionary, unit_id: String, count: int, h: Dictionary) -> String:
+	var have := 0
+	for g in site.get("garrison", []):
+		if String(g.unit) == unit_id:
+			have = int(g.count)
+	var n := mini(count, have)
+	if n <= 0:
+		return "据点里没有这支部队"
+	for g in site.get("garrison", []):
+		if String(g.unit) == unit_id:
+			g.count = int(g.count) - n
+	site["garrison"] = (site.get("garrison", []) as Array).filter(func(x): return int(x.count) > 0)
+	army_add(h, unit_id, n)
+	add_log("%s 从 %s 撤出 %d 名%s。" % [h.name, site.name, n, DB.UNITS[unit_id].name])
+	changed.emit()
+	return "撤出 %d 名%s" % [n, DB.UNITS[unit_id].name]
+
+## 己方领地：城镇 / 营地 / 矿场 / 伐木场
+func my_sites() -> Array:
+	var out := []
+	for t in towns:
+		if String(t.owner) == faction:
+			out.append(t)
+	for b in bases:
+		if String(b.owner) == faction:
+			out.append(b)
+	for m in mines:
+		if String(m.owner) == faction:
+			out.append(m)
+	return out
 
 func buy_item(town_id: int, item_id: String) -> String:
 	var t := find_by_id(towns, town_id)
@@ -757,17 +1082,33 @@ func end_turn() -> void:
 	if turn_busy or game_over != "":
 		return
 	turn_busy = true
-	for h in heroes:
-		if h.is_ai and h.alive:
-			ai_turn(h)
+	pending_defenses = []
+	if use_map_world and not factions.is_empty():
+		ai_phase()
+	else:
+		for h in heroes:
+			if h.is_ai and h.alive:
+				ai_turn(h)
+	# 有势力打到玩家据点：先让玩家决定死守还是撤退，再结算回合
+	if pending_defenses.is_empty():
+		settle_turn()
+	else:
+		awaiting_defense = true
+		defense_prompt.emit()
+
+## 玩家处理完所有「被进攻」事件之后，才真正结束这一回合
+func settle_turn() -> void:
+	awaiting_defense = false
+	pending_defenses = []
 	day += 1
 	income()
 	for h in heroes:
 		if h.alive:
 			h.mp = max_mp(h)
 			var regen := 2 + int(h.skill.get("wisdom", 0)) * 2
+			var fac_id := String(h.faction)
 			for t in towns:
-				if t.owner == (enemy_faction if h.is_ai else faction):
+				if String(t.owner) == fac_id:
 					regen += int(t.buildings.get("mage_tower", 0))
 			h.mana = mini(max_mana(h), int(h.mana) + regen)
 	if day % 3 == 0:
@@ -780,6 +1121,243 @@ func end_turn() -> void:
 		Saves.save_game(save_slot)
 	toast.emit("第 %d 天 · 回合结算完成" % day)
 	changed.emit()
+
+# ------------------------------------------------------------------ 多势力 AI
+func ai_phase() -> void:
+	for f in factions:
+		if bool(f.is_player):
+			continue
+		if not faction_alive(String(f.id)):
+			f.alive = false
+			continue
+		for h in heroes:
+			if not h.alive or not h.is_ai or String(h.faction) != String(f.id):
+				continue
+			_ai_hero_turn(h, f)
+
+func _ai_hero_turn(h: Dictionary, f: Dictionary) -> void:
+	# 兵源：每 3 天补一批，强度跟着全局 ai_power 走
+	if day % 3 == 0:
+		var pool: Array = DB.RECRUITS.get(String(f.id), [])
+		if not pool.is_empty():
+			army_add(h, String(pool[mini(2, pool.size() - 1)]), 3 + int(ai_power / 8))
+	var goal := _ai_pick_target(h, f)
+	if goal.is_empty():
+		return
+	if not use_map_world or map_terrain == null:
+		return
+	var tw: Vector3 = goal.get("wpos", Vector3.ZERO)
+	_ai_advance(h, tw, 14.0)
+	var hp: Vector3 = h.get("wpos", Vector3.ZERO)
+	if Vector2(hp.x - tw.x, hp.z - tw.z).length() <= 6.5:
+		_ai_attack_site(h, goal)
+
+func _ai_pick_target(h: Dictionary, f: Dictionary) -> Dictionary:
+	var best := {}
+	var bd := 1e20
+	var hp: Vector3 = h.get("wpos", Vector3.ZERO)
+	var cands := []
+	cands.append_array(bases)
+	cands.append_array(towns)
+	cands.append_array(mines)
+	for s in cands:
+		var owner := String(s.get("owner", ""))
+		if owner == String(f.id):
+			continue
+		# 空矿只在没野怪时才去（AI 不和野怪纠缠）
+		if owner == "" and (s.get("guards", []) as Array).size() > 0:
+			continue
+		var sw: Vector3 = s.get("wpos", Vector3.ZERO)
+		var d := Vector2(hp.x - sw.x, hp.z - sw.z).length()
+		if d < bd:
+			bd = d
+			best = s
+	return best
+
+## 沿地形朝目标推进（挑一个最朝向目标且能走的方向，绕过水面与陡坡）
+func _ai_advance(h: Dictionary, target: Vector3, budget: float) -> void:
+	var cur: Vector3 = h.get("wpos", target)
+	var flat := Vector3(target.x - cur.x, 0.0, target.z - cur.z)
+	var dist := flat.length()
+	var move := minf(budget, maxf(0.0, dist - 4.5))
+	if move < 0.5 or dist < 0.01:
+		return
+	var dir := flat.normalized()
+	var best := cur
+	var best_score := -1e9
+	for i in range(24):
+		var ang := TAU * float(i) / 24.0
+		var d := Vector3(cos(ang), 0.0, sin(ang))
+		var p := cur + d * move
+		if not _ai_walkable(p):
+			continue
+		var score := d.dot(dir) * 12.0
+		if score > best_score:
+			best_score = score
+			best = p
+	if best == cur:
+		return
+	best.y = _ai_height(best.x, best.z) + 0.05
+	h["wpos"] = best
+	h["pos"] = Vector2i(roundi(best.x), roundi(best.z))
+
+func _ai_height(x: float, z: float) -> float:
+	return 0.5 if map_terrain == null else float(map_terrain.height_at(x, z))
+
+func _ai_walkable(p: Vector3) -> bool:
+	if map_terrain == null:
+		return true
+	var half: float = float(map_terrain.map_size) * 0.44
+	if absf(p.x) > half or absf(p.z) > half:
+		return false
+	var hh := _ai_height(p.x, p.z)
+	if hh < 0.5:
+		return false
+	var slope: float = absf(_ai_height(p.x + 1.4, p.z) - hh) + absf(_ai_height(p.x, p.z + 1.4) - hh)
+	return slope < 2.4
+
+func _site_defense(ref: Dictionary) -> Array:
+	var out := []
+	for g in ref.get("garrison", []):
+		out.append(g)
+	for g in ref.get("guards", []):
+		out.append(g)
+	return out
+
+func _ai_attack_site(h: Dictionary, ref: Dictionary) -> void:
+	var owner := String(ref.get("owner", ""))
+	var defense := _site_defense(ref)
+	if defense.is_empty():
+		ref["owner"] = String(h.faction)
+		ref["garrison"] = []
+		ref["guards"] = []
+		ref["guarded"] = false
+		add_log("%s 的军队占领了 %s。" % [faction_name(String(h.faction)), String(ref.name)])
+		return
+	if owner == faction:
+		# 玩家的据点：挂起，等玩家选死守 / 撤退
+		pending_defenses.append({
+			"site_id": int(ref.id), "kind": String(ref.get("kind", "mine")), "name": String(ref.name),
+			"attacker": String(h.name), "attacker_faction": String(h.faction),
+			"attacker_strength": army_strength(h.army),
+			"defense": defense.duplicate(true),
+			"defense_strength": army_strength(defense),
+			"hero_id": int(h.id),
+		})
+		add_log("%s 的军队正在进攻 %s！" % [faction_name(String(h.faction)), String(ref.name)])
+		return
+	# AI 之间：战力快速结算，保证回合不卡
+	if army_strength(h.army) > army_strength(defense) * 1.1:
+		ref["owner"] = String(h.faction)
+		ref["garrison"] = []
+		ref["guards"] = []
+		ref["guarded"] = false
+		_scale_army(h, 0.75)
+		add_log("%s 夺取了 %s。" % [faction_name(String(h.faction)), String(ref.name)])
+	else:
+		_scale_defense(ref, 0.7)
+		_scale_army(h, 0.6)
+		add_log("%s 进攻 %s 失败。" % [faction_name(String(h.faction)), String(ref.name)])
+
+func _scale_army(h: Dictionary, f: float) -> void:
+	var arr := []
+	for s in h.army:
+		var n := int(round(float(s.count) * f))
+		if n > 0:
+			arr.append({"unit": String(s.unit), "count": n})
+	h.army = arr if not arr.is_empty() else [{"unit": "militia", "count": 3}]
+
+func _scale_defense(ref: Dictionary, f: float) -> void:
+	var arr := []
+	for s in ref.get("garrison", []):
+		var n := int(round(float(s.count) * f))
+		if n > 0:
+			arr.append({"unit": String(s.unit), "count": n})
+	ref["garrison"] = arr
+	var ga := []
+	for s in ref.get("guards", []):
+		var n2 := int(round(float(s.count) * f))
+		if n2 > 0:
+			ga.append({"unit": String(s.unit), "count": n2})
+	ref["guards"] = ga
+
+## 玩家对「据点被进攻」做决定：retreat = 撤退（丢产出、保住兵），否则死守
+func resolve_defense(retreat: bool) -> void:
+	if pending_defenses.is_empty():
+		return
+	var ev: Dictionary = pending_defenses.pop_front()
+	_apply_defense(ev, retreat)
+	check_game_over()
+	if pending_defenses.is_empty():
+		awaiting_defense = false
+		settle_turn()
+	else:
+		defense_prompt.emit()
+	changed.emit()
+
+func _apply_defense(ev: Dictionary, retreat: bool) -> void:
+	var ref := site_by_id(int(ev.site_id))
+	if ref.is_empty():
+		return
+	var atk := hero(int(ev.hero_id))
+	var atk_fac := String(ev.attacker_faction)
+	if retreat:
+		var moved := _retreat_garrison(ref)
+		ref["owner"] = atk_fac
+		ref["garrison"] = []
+		ref["guards"] = []
+		ref["guarded"] = false
+		if moved > 0:
+			add_log("你放弃 %s，%d 支部队撤往后方，产出随之丢失。" % [String(ref.name), moved])
+		else:
+			add_log("你放弃 %s，驻军就地解散。" % String(ref.name))
+		toast.emit("放弃 %s" % String(ref.name))
+		return
+	var ds := army_strength(ref.get("garrison", []))
+	var as_ := army_strength(atk.army) if not atk.is_empty() else int(ev.attacker_strength)
+	if ds >= as_ * 0.85:
+		_scale_defense(ref, 0.7)
+		if not atk.is_empty():
+			_scale_army(atk, 0.55)
+		add_log("守军击退了 %s，%s 仍在你手中。" % [String(ev.attacker), String(ref.name)])
+		toast.emit("%s 守住了" % String(ref.name))
+	else:
+		ref["owner"] = atk_fac
+		ref["garrison"] = []
+		ref["guards"] = []
+		ref["guarded"] = false
+		if not atk.is_empty():
+			_scale_army(atk, 0.6)
+		add_log("守军全灭，%s 落入 %s 之手。" % [String(ref.name), faction_name(atk_fac)])
+		toast.emit("%s 失守" % String(ref.name))
+
+func _retreat_garrison(ref: Dictionary) -> int:
+	var total := 0
+	var home := {}
+	for b in bases:
+		if String(b.owner) == faction:
+			home = b
+			break
+	if home.is_empty():
+		for t in towns:
+			if String(t.owner) == faction:
+				home = t
+				break
+	for g in ref.get("garrison", []):
+		total += int(g.count)
+		if home.is_empty():
+			continue
+		if not home.has("garrison"):
+			home["garrison"] = []
+		var found := false
+		for hg in home.get("garrison", []):
+			if String(hg.unit) == String(g.unit):
+				hg.count = int(hg.count) + int(g.count)
+				found = true
+				break
+		if not found:
+			home["garrison"].append({"unit": String(g.unit), "count": int(g.count)})
+	return total
 
 func ai_turn(h: Dictionary) -> void:
 	h.mp = max_mp(h)
@@ -842,7 +1420,7 @@ func random_event() -> void:
 	if eff.has("troops"):
 		for h in player_heroes():
 			army_add(h, "militia", 6)
-	if eff.has("camp"):
+	if eff.has("camp") and not tiles.is_empty():
 		var cells := tiles.keys()
 		var k: String = cells[rng.randi() % cells.size()]
 		var c: Vector2i = tiles[k].c
@@ -854,6 +1432,29 @@ func random_event() -> void:
 func check_game_over() -> void:
 	if game_over != "":
 		return
+	# ---- 多势力地图：消灭所有敌对势力即获胜
+	if not factions.is_empty():
+		var alive_enemies := 0
+		for f in factions:
+			if bool(f.is_player):
+				continue
+			var alive := faction_alive(String(f.id))
+			f.alive = alive
+			if alive:
+				alive_enemies += 1
+		if alive_enemies == 0:
+			game_over = "win"
+			popup.emit("大地重归寂静", "最后一面敌旗倒下了。金矿、伐木场与道路都在你手里。\n\n共用 %d 个回合。" % day, Callable())
+			return
+		var my_base := false
+		for b in bases:
+			if String(b.owner) == faction:
+				my_base = true
+		if not my_base and player_heroes().is_empty():
+			game_over = "lose"
+			popup.emit("长夜降临", "营地被踏平，最后一位统帅也倒下了。", Callable())
+		return
+	# ---- 旧的六边形地图：按天灾城镇与英雄判定
 	var enemy_towns := 0
 	var my_towns := 0
 	for t in towns:
@@ -873,6 +1474,25 @@ func check_game_over() -> void:
 		popup.emit("长夜降临", "近卫军团的旌旗倒下了。世界之树的最后一点绿意，被霜雪覆盖。", Callable())
 
 func objective() -> String:
+	if not factions.is_empty():
+		var alive := 0
+		var total := 0
+		for f in factions:
+			if bool(f.is_player):
+				continue
+			total += 1
+			if faction_alive(String(f.id)):
+				alive += 1
+		var gold_n := 0
+		var wood_n := 0
+		for m in mines:
+			if String(m.owner) != faction:
+				continue
+			if String(m.res) == "wood":
+				wood_n += 1
+			else:
+				gold_n += 1
+		return "剩余势力 %d/%d · 矿场 %d · 伐木场 %d · 第 %d 天" % [alive, total, gold_n, wood_n, day]
 	var mine_count := 0
 	for m in mines:
 		if m.owner == faction:
@@ -894,6 +1514,8 @@ func restore(d: Dictionary) -> void:
 	mines = (d.get("mines", []) as Array).duplicate(true)
 	camps = (d.get("camps", []) as Array).duplicate(true)
 	caches = (d.get("caches", []) as Array).duplicate(true)
+	bases = (d.get("bases", []) as Array).duplicate(true)
+	factions = (d.get("factions", []) as Array).duplicate(true)
 	heroes = (d.get("heroes", []) as Array).duplicate(true)
 	explored = (d.get("explored", {}) as Dictionary).duplicate(true)
 	journal = (d.get("journal", []) as Array).duplicate(true)
@@ -907,6 +1529,8 @@ func restore(d: Dictionary) -> void:
 	pending_battle = {}
 	game_over = ""
 	turn_busy = false
+	pending_defenses = []
+	awaiting_defense = false
 	visible_cells.clear()
 	compute_vision()
 	changed.emit()

@@ -134,13 +134,14 @@ func _on_goto(view: String, payload: Dictionary) -> void:
 	match view:
 		"title":  v = TitleView.new()
 		"create": v = CreateHeroView.new()
-		"world":  v = World3DView.new()
+		"world":  v = WorldMapView.new()
+		"worldhex": v = World3DView.new()
 		"world2d": v = WorldView.new()
 		"town":   v = TownView.new()
 		"hero":   v = HeroView.new()
 		"battle": v = BattleView.new()
 		"codex":  v = CodexView.new()
-		_: v = World3DView.new()
+		_: v = WorldMapView.new()
 	if payload.has("town_id") and v.has_method("setup"):
 		v.call("setup", payload)
 	elif v.has_method("setup"):

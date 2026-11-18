@@ -7,7 +7,7 @@ const RES_ORDER := ["gold", "wood", "ore", "crystal", "essence"]
 
 const RES := {
 	"gold":    {"name": "金币",   "short": "金", "color": "#f2c14e", "daily": 500},
-	"wood":    {"name": "木材",   "short": "木", "color": "#8fbf6a", "daily": 4},
+	"wood":    {"name": "木材",   "short": "木", "color": "#8fbf6a", "daily": 20},
 	"ore":     {"name": "秘银矿", "short": "矿", "color": "#a9b6c6", "daily": 4},
 	"crystal": {"name": "水晶",   "short": "晶", "color": "#7fd8f0", "daily": 2},
 	"essence": {"name": "灵魂精华", "short": "魂", "color": "#c58be8", "daily": 1},
@@ -21,7 +21,19 @@ const MINE_NAMES := {
 const FACTIONS := {
 	"sentinel": {"name": "近卫军团", "color": "#5fb8e8", "dark": "#16394f", "desc": "守护世界之树的秩序之师"},
 	"scourge":  {"name": "天灾军团", "color": "#e0645c", "dark": "#4a1c1c", "desc": "自冰封王座蔓延的亡灵与恶魔"},
+	"claw":     {"name": "赤爪氏族", "color": "#e39b3f", "dark": "#4a3418", "desc": "盘踞东岭的兽人部族，靠掠夺与驯兽为生"},
+	"iron":     {"name": "铁誓团",   "color": "#a9b6c6", "dark": "#2b3542", "desc": "为金币而战的雇佣军团，防线硬得像铁"},
+	"ash":      {"name": "灰烬教团", "color": "#b96fd0", "dark": "#3a2340", "desc": "崇拜火焰的秘教徒，用灰烬复活死者"},
 	"neutral":  {"name": "中立",     "color": "#b8ac90", "dark": "#2b2a26", "desc": "游荡于荒野的生物"},
+}
+
+## 各方势力的兵种池（招募用）。sentinel 才是玩家可用的。
+const RECRUITS := {
+	"sentinel": ["militia", "archer", "priest", "knight", "treant", "griffin"],
+	"scourge":  ["ghoul", "skeleton_archer", "necromancer", "gargoyle", "abomination", "frost_drake"],
+	"claw":     ["militia", "archer", "ogre", "knight", "golem", "griffin"],
+	"iron":     ["militia", "archer", "priest", "knight", "golem", "griffin"],
+	"ash":      ["ghoul", "skeleton_archer", "necromancer", "gargoyle", "abomination", "frost_drake"],
 }
 
 const TERRAIN := {
@@ -241,11 +253,6 @@ const BUILDINGS := {
 }
 
 # 各阵营可招募的兵种（按建筑等级解锁）
-const RECRUITS := {
-	"sentinel": ["militia", "archer", "priest", "knight", "treant", "griffin"],
-	"scourge":  ["ghoul", "skeleton_archer", "necromancer", "gargoyle", "abomination", "frost_drake"],
-}
-
 # ---------------------------------------------------------------- 剧情
 const STORY_INTRO := [
 	"世界之树的根须仍在燃烧。自冰封王座苏醒之日起，天灾军团的亡灵浪潮已吞没了北境三座城邦。",
